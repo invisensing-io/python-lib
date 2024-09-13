@@ -1,10 +1,35 @@
+##
+# @file File.py
+# @brief This file contains the implementation of the File class.
+# @date 2024-09-13
+# @section libraries_main Libraries/Modules
+# - struct standard library (https://docs.python.org/3/library/struct.html#module-struct)
+#   - Access to method `struct.unpack`.
+# - numpy standard library (https://numpy.org/)
+#   - Access to numpy module for data manipulation.
+# - os standard library (https://docs.python.org/3/library/os.html#module-os)
+#   - Access to os module for get size of file.
+# - IntEnum standard library (https://docs.python.org/3/library/enum.html#intenum)
+#   - Access to IntEnum class for enumerated types.
+#
+# Copyright (c) 2024 Invisensing.  All rights reserved.
+
+# Imports
 import struct
 import numpy as np
 import os
 from enum import IntEnum
 
+## Global Constants
+#    Constants used in the application.
+#    This class contains global constants, including physical constants.
+#
 class Constants:
-    LIGHT_SPEED_IN_FIBER = 206856796;  # m/s
+    """
+    Constants used in the application.
+    This class contains global constants, including physical constants.
+    """
+    LIGHT_SPEED_IN_FIBER = 206856796  # m/s
 
 HEADER_SIZE = 128
 HEADER_FORMAT = '32siiiiii72x'
