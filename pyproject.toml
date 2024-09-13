@@ -1,0 +1,22 @@
+[build-system]
+requires = ["poetry-core>=1.0.0"]
+build-backend = "poetry.core.masonry.api"
+
+[tool.poetry]
+name = "invisensing"
+version = "0.1"
+authors = [
+    "Louis Thievent",
+]
+description = "Python SDK for Invisensing environment"
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Operating System :: OS Independent",
+]
+
+[tool.poetry.dependencies]
+python = "^3.9"
+numpy = "^1.2"
+[tool.poetry.group.dev.dependencies]
+pytest = "^8.3.3"
+
