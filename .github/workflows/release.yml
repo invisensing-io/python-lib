@@ -66,18 +66,22 @@ jobs:
           name: wheels-linux-${{ matrix.target }}
           path: dist/
 
-  # ── macOS wheels: explicit (target × python) matrix ──
+  # ── macOS wheels: aarch64 only (Apple Silicon native) ──
   #
-  # `setup-python@v5` installs ONE interpreter per job, so we add a
-  # Python axis to the matrix and build a single wheel per job.
+  # `macos-13` (the last GitHub-hosted Intel runner pool) is heavily
+  # saturated — observed >20 min queue time with no runner pickup. The
+  # x86_64 axis is dropped from this release; Intel-Mac users install
+  # via `pip install invisensing` which falls back to the sdist (needs
+  # a Rust toolchain). Add x86_64 back in a follow-up release if there
+  # is real demand. Apple Silicon (arm64) ships normally — that's the
+  # vast majority of current Mac users.
   build-macos:
     name: wheels · macos · ${{ matrix.target }} · py${{ matrix.python }}
-    # macos-13 is the last x86_64 runner; macos-14+ are arm64-native.
-    runs-on: ${{ matrix.target == 'x86_64' && 'macos-13' || 'macos-14' }}
+    runs-on: macos-14
     strategy:
       fail-fast: false
       matrix:
-        target: [x86_64, aarch64]
+        target: [aarch64]
         python: ["3.9", "3.10", "3.11", "3.12", "3.13"]
     steps:
       - uses: actions/checkout@v4
