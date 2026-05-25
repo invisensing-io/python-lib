@@ -1,22 +1,47 @@
 [build-system]
-requires = ["poetry-core>=1.0.0"]
-build-backend = "poetry.core.masonry.api"
+requires = ["maturin>=1.5,<2.0"]
+build-backend = "maturin"
 
-[tool.poetry]
+[project]
 name = "invisensing"
-version = "0.1"
+version = "0.2.0"
+description = "Python SDK for the Invisensing DAS environment — reads PCIe7821 acquisition files (DAT / HDF5 / TDMS / SEG-Y) and extracts per-channel data (I / Q / arctan / magnitude / phase)."
+readme = "README.md"
+requires-python = ">=3.9"
 authors = [
-    "Louis Thievent",
+    { name = "Louis Thievent" },
 ]
-description = "Python SDK for Invisensing environment"
 classifiers = [
     "Programming Language :: Python :: 3",
     "Operating System :: OS Independent",
+    "Intended Audience :: Science/Research",
+    "Topic :: Scientific/Engineering",
+]
+# Default install pulls in every format backend so `pip install invisensing`
+# Just Works on DAT, HDF5, TDMS, and SEG-Y captures out of the box. The Rust
+# core does the heavy lifting (header parse + de-interleave); these libs are
+# only consulted for their format-specific metadata + bytes → numpy step.
+dependencies = [
+    "numpy>=1.20",
+    "h5py>=3.0",
+    "npTDMS>=1.6",
+    "segyio>=1.9",
 ]
 
-[tool.poetry.dependencies]
-python = "^3.9"
-numpy = "^1.2"
-[tool.poetry.group.dev.dependencies]
-pytest = "^8.3.3"
+[project.optional-dependencies]
+# Aliases retained for backwards compatibility with older installation
+# instructions. They are no-ops now — the format backends are part of the
+# default install — but `pip install invisensing[hdf5]` still resolves cleanly.
+hdf5 = ["h5py>=3.0"]
+tdms = ["npTDMS>=1.6"]
+segy = ["segyio>=1.9"]
+all  = ["h5py>=3.0", "npTDMS>=1.6", "segyio>=1.9"]
+dev  = ["pytest>=8.0", "maturin>=1.5"]
 
+[tool.maturin]
+# `python-source = "python"` tells maturin where the pure-Python package lives;
+# `module-name` tells it the Rust extension is imported as `invisensing._core`,
+# so the Rust crate gets copied next to the Python package in the wheel.
+python-source = "python"
+module-name   = "invisensing._core"
+features      = ["pyo3/extension-module"]

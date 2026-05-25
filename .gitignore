@@ -1,3 +1,31 @@
+# Python build artefacts
 dist/
+build/
+*.egg-info/
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.tox/
+.coverage
+htmlcov/
+
+# Rust build artefacts (maturin / cargo)
+target/
 *.lock
+Cargo.lock
+
+# Compiled native extension copied into the package by `maturin develop`
+python/invisensing/*.so
+python/invisensing/*.pyd
+
+# IDE / editor
+.vscode/
+.idea/
+*.swp
+
+# Test outputs
+tests/output/
+
+# Generated docs
 Docs/*
