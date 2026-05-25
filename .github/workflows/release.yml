@@ -171,3 +171,41 @@ jobs:
         with:
           skip-existing: true
           verbose: true
+
+  # ── Create a GitHub Release entry from the tag ──
+  #
+  # Runs after PyPI publish succeeds — links the wheels back to the
+  # tag in the Releases UI and populates the page that PyPI's
+  # "Changelog" link points to. Release notes are auto-extracted from
+  # the annotated tag message; `gh release create` uses the tag
+  # subject as the title.
+  github-release:
+    name: create GitHub Release
+    needs: [publish]
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    permissions:
+      contents: write       # required to create a Release
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0    # need full history + tags for `gh release create`
+
+      - name: Download wheels + sdist
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Create GitHub Release with the tag's annotated message
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="${GITHUB_REF##*/}"
+          # Extract the annotated tag message (everything after the
+          # `tagger ...` header line) — that becomes the Release body.
+          BODY=$(git tag -l --format='%(contents)' "$TAG")
+          gh release create "$TAG" \
+            --title "$TAG" \
+            --notes "$BODY" \
+            dist/*
