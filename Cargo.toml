@@ -17,10 +17,13 @@ crate-type = ["cdylib"]
 # PyO3 binds Rust functions to Python; `extension-module` builds a .so/.pyd that
 # Python's import machinery picks up directly (no libpython link at compile time
 # — needed for portable wheels under PEP 599 / manylinux).
-pyo3 = { version = "0.22", features = ["extension-module"] }
+# PyO3 0.24 brings the fix for the `PyString::from_object` buffer
+# overflow advisory (the 0.22.x branch was never patched). Numpy bumps
+# in lockstep — the two crates pin matching versions to each other.
+pyo3 = { version = "0.24", features = ["extension-module"] }
 # numpy gives us zero-copy `PyArray1`/`PyArray2` constructors and lets us return
 # numpy arrays whose memory is owned by Rust without an extra copy.
-numpy = "0.22"
+numpy = "0.24"
 
 [profile.release]
 # Wheels ship release builds; tune for runtime perf over compile time.

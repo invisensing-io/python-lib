@@ -477,33 +477,33 @@ fn bytes_to_typed_array<'py>(
         (2, _) => {
             let arr = Array2::<i16>::from_shape_vec(shape, bytes_to_vec::<i16>(&bytes))
                 .map_err(|e| PyValueError::new_err(format!("shape mismatch: {e}")))?;
-            PyArray2::from_owned_array_bound(py, arr).into_any()
+            PyArray2::from_owned_array(py, arr).into_any()
         }
         (4, true) => {
             let arr = Array2::<f32>::from_shape_vec(shape, bytes_to_vec::<f32>(&bytes))
                 .map_err(|e| PyValueError::new_err(format!("shape mismatch: {e}")))?;
-            PyArray2::from_owned_array_bound(py, arr).into_any()
+            PyArray2::from_owned_array(py, arr).into_any()
         }
         (4, false) => {
             let arr = Array2::<i32>::from_shape_vec(shape, bytes_to_vec::<i32>(&bytes))
                 .map_err(|e| PyValueError::new_err(format!("shape mismatch: {e}")))?;
-            PyArray2::from_owned_array_bound(py, arr).into_any()
+            PyArray2::from_owned_array(py, arr).into_any()
         }
         (8, true) => {
             let arr = Array2::<f64>::from_shape_vec(shape, bytes_to_vec::<f64>(&bytes))
                 .map_err(|e| PyValueError::new_err(format!("shape mismatch: {e}")))?;
-            PyArray2::from_owned_array_bound(py, arr).into_any()
+            PyArray2::from_owned_array(py, arr).into_any()
         }
         (8, false) => {
             let arr = Array2::<i64>::from_shape_vec(shape, bytes_to_vec::<i64>(&bytes))
                 .map_err(|e| PyValueError::new_err(format!("shape mismatch: {e}")))?;
-            PyArray2::from_owned_array_bound(py, arr).into_any()
+            PyArray2::from_owned_array(py, arr).into_any()
         }
         (1, _) => {
             // u8 path: no reinterpret needed, hand the bytes straight to ndarray.
             let arr = Array2::<u8>::from_shape_vec(shape, bytes)
                 .map_err(|e| PyValueError::new_err(format!("shape mismatch: {e}")))?;
-            PyArray2::from_owned_array_bound(py, arr).into_any()
+            PyArray2::from_owned_array(py, arr).into_any()
         }
         (s, f) => {
             return Err(PyValueError::new_err(format!(
@@ -575,7 +575,7 @@ fn split_pair_i16_primary<'py>(
     let out = split_lane_into_vec::<i16>(view, 0, rows * out_cols);
     let arr = Array2::from_shape_vec((rows, out_cols), out)
         .map_err(|e| PyValueError::new_err(format!("shape mismatch: {e}")))?;
-    Ok(PyArray2::from_owned_array_bound(py, arr))
+    Ok(PyArray2::from_owned_array(py, arr))
 }
 
 /// Pick the odd-indexed (secondary) lane of an INTERLEAVED `i16` array.
@@ -593,7 +593,7 @@ fn split_pair_i16_secondary<'py>(
     let out = split_lane_into_vec::<i16>(view, 1, rows * out_cols);
     let arr = Array2::from_shape_vec((rows, out_cols), out)
         .map_err(|e| PyValueError::new_err(format!("shape mismatch: {e}")))?;
-    Ok(PyArray2::from_owned_array_bound(py, arr))
+    Ok(PyArray2::from_owned_array(py, arr))
 }
 
 /// Pick the odd-indexed lane of an INTERLEAVED `i16` array and
@@ -625,7 +625,7 @@ fn split_pair_unsigned<'py>(
 
     let arr = Array2::from_shape_vec((rows, out_cols), u16_vec)
         .map_err(|e| PyValueError::new_err(format!("shape mismatch: {e}")))?;
-    Ok(PyArray2::from_owned_array_bound(py, arr))
+    Ok(PyArray2::from_owned_array(py, arr))
 }
 
 /// Build a `complex64` array from an INTERLEAVED `i16` I,Q payload:
@@ -665,7 +665,7 @@ fn split_pair_to_complex_i16<'py>(
 
     let arr = Array2::from_shape_vec((rows, out_cols), out)
         .map_err(|e| PyValueError::new_err(format!("shape mismatch: {e}")))?;
-    Ok(PyArray2::from_owned_array_bound(py, arr))
+    Ok(PyArray2::from_owned_array(py, arr))
 }
 
 /// f32 even-lane picker — provided for parity with the i16 kernels.
@@ -681,7 +681,7 @@ fn split_pair_f32_primary<'py>(
     let out = split_lane_into_vec::<f32>(view, 0, rows * out_cols);
     let arr = Array2::from_shape_vec((rows, out_cols), out)
         .map_err(|e| PyValueError::new_err(format!("shape mismatch: {e}")))?;
-    Ok(PyArray2::from_owned_array_bound(py, arr))
+    Ok(PyArray2::from_owned_array(py, arr))
 }
 
 #[pyfunction]
@@ -696,7 +696,7 @@ fn split_pair_f32_secondary<'py>(
     let out = split_lane_into_vec::<f32>(view, 1, rows * out_cols);
     let arr = Array2::from_shape_vec((rows, out_cols), out)
         .map_err(|e| PyValueError::new_err(format!("shape mismatch: {e}")))?;
-    Ok(PyArray2::from_owned_array_bound(py, arr))
+    Ok(PyArray2::from_owned_array(py, arr))
 }
 
 /// Centralised shape check so every kernel returns the same error
@@ -772,7 +772,7 @@ fn build_header_bytes<'py>(py: Python<'py>, header: &Header) -> PyResult<Bound<'
     write(&mut buf, offsets::PULSE_WIDTH, header.pulse_width);
     write(&mut buf, offsets::NUM_CHANNELS, header.num_channels);
 
-    Ok(PyBytes::new_bound(py, &buf))
+    Ok(PyBytes::new(py, &buf))
 }
 
 // ── Module init ─────────────────────────────────────────────────────────────
