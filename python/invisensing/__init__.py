@@ -36,7 +36,7 @@ module is a thin shim that delegates to the modern :class:`File`.
 API stability
 -------------
 
-Everything in :data:`__all__` is **stable** from v0.2.0 onwards.
+Everything in :data:`__all__` is **stable** from v1.0.0 onwards.
 Adding new optional arguments, methods, properties, or formats is
 allowed (additive changes); renaming or removing anything in
 :data:`__all__` is not.
@@ -69,7 +69,7 @@ from ._reader import (
 )
 from . import _legacy as _legacy_impl
 
-__version__ = "0.2.0"
+__version__ = "1.0.0"
 
 __all__ = [
     "File",

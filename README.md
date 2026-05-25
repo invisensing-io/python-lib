@@ -3,10 +3,18 @@
 `invisensing` is the official Python library for reading **Distributed
 Acoustic Sensing (DAS)** acquisition files produced by the Audace
 platform. It handles every file format the platform writes (`.dat`,
-`.hdf5`, `.tdms`, `.sgy`) through a single uniform API, and lets you
-extract the channel of interest (raw, I, Q, arctan, magnitude, phase)
-in one line — regardless of which on-board demodulation mode the
-PCIe7821 acquisition card was running.
+`.hdf5`, `.tdms`, `.sgy`) through a single uniform API, and exposes
+the channels each file actually contains — `I` / `Q` / `arctan` /
+`magnitude` / `phase` — in one method call, with the right dtype and
+optional physical-unit scaling.
+
+The library is **format-agnostic but mode-faithful**: it never
+silently re-derives one demodulation product from another. The
+on-board PCIe7821 DSP chain (fading suppression, spatial differential,
+detrend filter) is not reproducible in software from an earlier tap,
+so the channel you can extract is the one the FPGA wrote. Inspect
+``file.mode`` to dispatch; the SDK raises a clear `ValueError` if you
+call an extractor that doesn't apply.
 
 The hot path (header parsing, bytes → numpy conversion, de-interleave)
 is implemented in **Rust** and exposed through PyO3, so reading a
@@ -243,7 +251,7 @@ wire format byte-for-byte) followed by the array's raw samples. The
 ## API stability
 
 Everything exported via `from invisensing import *` is part of the
-**stable public API** starting from version 0.2.0. We follow semantic
+**stable public API** starting from version 1.0.0. We follow semantic
 versioning:
 
 - **Patch releases** (0.2.x): bug fixes, performance improvements.

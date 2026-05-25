@@ -26,8 +26,8 @@ Until the first version is uploaded, PyPI doesn't track the project
 at all. You can either:
 
 - **Upload a tiny v0.1.0 from your laptop once**, then continue with
-  CI from v0.2.0 onwards. Simplest. See the manual fallback below.
-- **Or skip the reservation** — when CI uploads v0.2.0 it will create
+  CI from v1.0.0 onwards. Simplest. See the manual fallback below.
+- **Or skip the reservation** — when CI uploads v1.0.0 it will create
   the project on the fly. The risk is the name being squatted in the
   meantime, but `invisensing` is unique enough that this is unlikely.
 
@@ -104,10 +104,10 @@ good. Skip ahead to step 3.
 
 ```bash
 git add pyproject.toml Cargo.toml
-git commit -m "release: v0.2.0"
-git tag v0.2.0
+git commit -m "release: v1.0.0"
+git tag v1.0.0
 git push origin master
-git push origin v0.2.0       # ← this is what triggers the release
+git push origin v1.0.0       # ← this is what triggers the release
 ```
 
 ### Step 4 — Watch the CI
@@ -152,7 +152,7 @@ PyPI (e.g. before the first ever upload):
    `environment.name` to `testpypi`, add
    `repository-url: https://test.pypi.org/legacy/` to the
    `pypa/gh-action-pypi-publish` step.
-4. Push a tag like `v0.2.0-rc1` (the regex matches `v*` so any tag
+4. Push a tag like `v1.0.0-rc1` (the regex matches `v*` so any tag
    triggers — either change the trigger or just be careful which
    workflow you trigger).
 

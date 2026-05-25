@@ -1,6 +1,6 @@
 [package]
 name = "invisensing-core"
-version = "0.2.0"
+version = "1.0.0"
 edition = "2021"
 description = "Native Rust core for the Invisensing Python SDK — fast DAT reader and de-interleave kernels for PCIe7821 DAS acquisitions"
 license = "MIT"

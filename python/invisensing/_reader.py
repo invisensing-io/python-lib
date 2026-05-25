@@ -1,7 +1,7 @@
 """
 Modern :class:`File` reader for Audace DAS acquisition files.
 
-The public API is **stable** from v0.2.0 onwards. Anything not exported
+The public API is **stable** from v1.0.0 onwards. Anything not exported
 via :data:`__all__` is internal and may change without notice.
 
 Usage::
