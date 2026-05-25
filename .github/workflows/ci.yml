@@ -1,0 +1,46 @@
+# Continuous-integration sanity check for every push / PR.
+#
+# Builds the Rust extension on Linux against the currently-supported
+# Python versions and runs the pytest suite. Keeps `release.yml`
+# focused on the publishing pipeline (and avoids paying for the full
+# manylinux + macOS + Windows matrix on every commit — only release
+# tags trigger that).
+
+name: CI
+
+on:
+  push:
+    branches: [master, main]
+  pull_request: {}
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: tests · python ${{ matrix.python }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.9", "3.10", "3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Install maturin + test deps
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install maturin pytest numpy h5py npTDMS segyio
+
+      - name: Build + install the extension (editable, release)
+        run: maturin develop --release
+
+      - name: Run the test suite
+        run: pytest tests/ -v

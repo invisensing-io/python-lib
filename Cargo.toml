@@ -3,7 +3,10 @@ name = "invisensing-core"
 version = "0.2.0"
 edition = "2021"
 description = "Native Rust core for the Invisensing Python SDK — fast DAT reader and de-interleave kernels for PCIe7821 DAS acquisitions"
-license = "Proprietary"
+license = "MIT"
+repository = "https://github.com/invisensing-io/python-lib"
+keywords = ["DAS", "fiber-optic", "demodulation", "audace", "pyo3"]
+categories = ["science"]
 
 [lib]
 # The Python wheel imports this as `invisensing._core` (see lib.rs #[pymodule]).

@@ -1,0 +1,183 @@
+# Build multi-platform wheels and publish to PyPI on tagged releases.
+#
+# Trigger:
+#   - Push a tag matching `v*` (e.g. `v0.2.0`) → CI builds wheels for
+#     Linux x86_64/aarch64 + macOS x86_64/arm64 + Windows x86_64 across
+#     CPython 3.9–3.13, plus the source distribution, then uploads them
+#     all to PyPI in a single atomic publish step.
+#
+# Authentication:
+#   - Uses **PyPI Trusted Publishing (OIDC)** — no API token to manage,
+#     no secret to leak. The trust relationship is configured once on
+#     PyPI side (see PUBLISHING.md for the one-time setup).
+#
+# Manual trigger:
+#   - You can also run the workflow from the Actions tab via
+#     `workflow_dispatch` to verify the build matrix without publishing
+#     (publish job only runs on tag pushes).
+
+name: Release to PyPI
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch: {}
+
+# Only one release pipeline at a time per ref. Cancel an in-flight one
+# if a newer tag is pushed (rare but cheap).
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  # ── Linux wheels: x86_64 (manylinux2014) + aarch64 (manylinux_2_28) ──
+  build-linux:
+    name: wheels · linux · ${{ matrix.target }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [x86_64, aarch64]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+
+      # PyO3/maturin-action handles the Rust toolchain + manylinux
+      # container setup automatically. `--release` and the strip flag
+      # come from pyproject.toml [tool.maturin].
+      - name: Build wheels (maturin)
+        uses: PyO3/maturin-action@v1
+        with:
+          target: ${{ matrix.target }}
+          # CPython 3.9 → 3.13. Python 3.14 stays out until upstream
+          # numpy / pyo3 publish wheels for it.
+          args: --release --out dist --interpreter 3.9 3.10 3.11 3.12 3.13
+          # manylinux2014 → glibc 2.17 (CentOS 7 vintage). Broadest
+          # compat without dropping into musllinux territory.
+          manylinux: 2014
+          # The build runs inside the manylinux container; sccache
+          # caches rustc artefacts across runs to keep CI under ~10 min.
+          sccache: true
+
+      - name: Smoke-test the wheel (x86_64 only — aarch64 has no native runner)
+        if: matrix.target == 'x86_64'
+        run: |
+          pip install --find-links dist invisensing
+          python -c "from invisensing import File, Mode; print('ok:', Mode.IQ)"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheels-linux-${{ matrix.target }}
+          path: dist/
+
+  # ── macOS wheels: x86_64 (Intel) + arm64 (Apple Silicon) ─────────────
+  build-macos:
+    name: wheels · macos · ${{ matrix.target }}
+    # macos-13 is the last x86_64 runner; macos-14+ are arm64-native.
+    runs-on: ${{ matrix.target == 'x86_64' && 'macos-13' || 'macos-14' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [x86_64, aarch64]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+      - name: Build wheels (maturin)
+        uses: PyO3/maturin-action@v1
+        with:
+          target: ${{ matrix.target }}
+          args: --release --out dist --interpreter 3.9 3.10 3.11 3.12 3.13
+          sccache: true
+
+      - name: Smoke-test the wheel
+        run: |
+          pip install --find-links dist invisensing
+          python -c "from invisensing import File, Mode; print('ok:', Mode.IQ)"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheels-macos-${{ matrix.target }}
+          path: dist/
+
+  # ── Windows wheels: x86_64 ───────────────────────────────────────────
+  build-windows:
+    name: wheels · windows · x86_64
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+      - name: Build wheels (maturin)
+        uses: PyO3/maturin-action@v1
+        with:
+          target: x86_64
+          args: --release --out dist --interpreter 3.9 3.10 3.11 3.12 3.13
+          sccache: true
+
+      - name: Smoke-test the wheel
+        run: |
+          pip install --find-links dist invisensing
+          python -c "from invisensing import File, Mode; print('ok:', Mode.IQ)"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheels-windows-x86_64
+          path: dist/
+
+  # ── Source distribution (single sdist for all platforms) ─────────────
+  build-sdist:
+    name: sdist
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build sdist (maturin)
+        uses: PyO3/maturin-action@v1
+        with:
+          command: sdist
+          args: --out dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sdist
+          path: dist/
+
+  # ── Publish: gathers all wheels + sdist and uploads to PyPI ──────────
+  #
+  # Runs only on tag pushes (skipped on workflow_dispatch). Uses Trusted
+  # Publishing — no PYPI_API_TOKEN, no secret. The `id-token: write`
+  # permission grants this workflow the OIDC token PyPI verifies.
+  publish:
+    name: publish to PyPI
+    needs: [build-linux, build-macos, build-windows, build-sdist]
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    environment:
+      name: pypi
+      url: https://pypi.org/p/invisensing
+    permissions:
+      id-token: write     # OIDC token for Trusted Publishing
+      contents: read
+    steps:
+      - name: Download all build artefacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: List what's about to be published
+        run: ls -la dist/
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          # Default `repository-url` is https://upload.pypi.org/legacy/ (prod).
+          # For a dry-run to TestPyPI, set repository-url:
+          #   https://test.pypi.org/legacy/
+          # and adjust the `environment.name` above to a TestPyPI-bound env.
+          skip-existing: true
+          verbose: true

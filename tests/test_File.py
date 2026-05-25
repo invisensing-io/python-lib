@@ -16,6 +16,15 @@ import invisensing.File as iFile
 
 ASSET = "tests/assets/demodulated.dat"
 
+# The fixture is shipped in the git repo but excluded from the PyPI
+# sdist (it's 18 MB of synthetic data, only useful for our own
+# round-trip tests). Skip the legacy suite cleanly when it's missing
+# instead of crashing on a file-not-found.
+pytestmark = pytest.mark.skipif(
+    not os.path.exists(ASSET),
+    reason="tests/assets/demodulated.dat not present (likely installing from sdist)",
+)
+
 
 def test_open_file():
     file = iFile.File(ASSET)

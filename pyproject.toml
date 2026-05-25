@@ -5,17 +5,47 @@ build-backend = "maturin"
 [project]
 name = "invisensing"
 version = "0.2.0"
-description = "Python SDK for the Invisensing DAS environment — reads PCIe7821 acquisition files (DAT / HDF5 / TDMS / SEG-Y) and extracts per-channel data (I / Q / arctan / magnitude / phase)."
+description = "Python SDK for the Invisensing Audace DAS environment — reads PCIe7821 acquisition files (DAT / HDF5 / TDMS / SEG-Y) and extracts per-channel data (I / Q / arctan / magnitude / phase) via a Rust-backed core."
 readme = "README.md"
 requires-python = ">=3.9"
+license = "MIT"
+license-files = ["LICENSE"]
 authors = [
+    { name = "Invisensing", email = "contact@invisensing.io" },
     { name = "Louis Thievent" },
 ]
+keywords = [
+    "DAS",
+    "distributed-acoustic-sensing",
+    "fiber-optic",
+    "geophysics",
+    "seismic",
+    "PCIe7821",
+    "demodulation",
+    "audace",
+    "hdf5",
+    "segy",
+    "tdms",
+]
 classifiers = [
-    "Programming Language :: Python :: 3",
-    "Operating System :: OS Independent",
+    "Development Status :: 4 - Beta",
     "Intended Audience :: Science/Research",
+    "Intended Audience :: Developers",
     "Topic :: Scientific/Engineering",
+    "Topic :: Scientific/Engineering :: Physics",
+    "Topic :: Scientific/Engineering :: Information Analysis",
+    "Topic :: System :: Hardware :: Hardware Drivers",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Rust",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: MacOS",
+    "Operating System :: Microsoft :: Windows",
+    "Typing :: Typed",
 ]
 # Default install pulls in every format backend so `pip install invisensing`
 # Just Works on DAT, HDF5, TDMS, and SEG-Y captures out of the box. The Rust
@@ -27,6 +57,13 @@ dependencies = [
     "npTDMS>=1.6",
     "segyio>=1.9",
 ]
+
+[project.urls]
+Homepage = "https://github.com/invisensing-io/python-lib"
+Documentation = "https://invisensing-io.github.io/python-lib/"
+Repository = "https://github.com/invisensing-io/python-lib"
+Issues = "https://github.com/invisensing-io/python-lib/issues"
+Changelog = "https://github.com/invisensing-io/python-lib/releases"
 
 [project.optional-dependencies]
 # Aliases retained for backwards compatibility with older installation
@@ -45,3 +82,23 @@ dev  = ["pytest>=8.0", "maturin>=1.5"]
 python-source = "python"
 module-name   = "invisensing._core"
 features      = ["pyo3/extension-module"]
+# Strip debug symbols from the released wheel — keeps the .so under a few MB.
+strip         = true
+# Files that should NOT end up in the source distribution. The test
+# fixture is 18 MB of synthetic DAS samples — fine to keep in the git
+# repo (legacy round-trip test uses it), pointless inside the .tar.gz
+# that goes to PyPI (users installing don't run our internal tests).
+exclude       = [
+    "tests/output/*",
+    "tests/assets/*",
+    "target/*",
+    "Cargo.lock",
+    "Docs/*",
+    ".github/*",
+    "Doxyfile",
+    "PUBLISHING.md",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"

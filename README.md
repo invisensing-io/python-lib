@@ -367,4 +367,4 @@ facade in [`python/invisensing/`](python/invisensing/).
 
 ## License
 
-Proprietary — © Invisensing.
+MIT — © 2024-2026 Invisensing. See [LICENSE](LICENSE) for the full text.
