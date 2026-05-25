@@ -1,0 +1,36 @@
+# Manually create GitHub Releases for any existing tag that doesn't
+# have one yet. Useful one-shot to populate the Releases page from
+# the v1.0.x tags that were pushed before the auto-release job was
+# added to release.yml.
+#
+# Trigger: workflow_dispatch only. Won't fire on normal pushes.
+
+name: Backfill GitHub Releases
+
+on:
+  workflow_dispatch: {}
+
+jobs:
+  backfill:
+    name: backfill missing releases
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0       # full history + tags
+
+      - name: Create a Release for every v* tag without one
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          for tag in $(git tag -l 'v*' | sort -V); do
+            if gh release view "$tag" >/dev/null 2>&1; then
+              echo "skip $tag — release already exists"
+              continue
+            fi
+            BODY=$(git tag -l --format='%(contents)' "$tag")
+            echo "creating release $tag"
+            gh release create "$tag" --title "$tag" --notes "$BODY"
+          done
