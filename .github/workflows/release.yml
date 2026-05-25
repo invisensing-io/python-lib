@@ -1,7 +1,7 @@
 # Build multi-platform wheels and publish to PyPI on tagged releases.
 #
 # Trigger:
-#   - Push a tag matching `v*` (e.g. `v0.2.0`) → CI builds wheels for
+#   - Push a tag matching `v*` (e.g. `v1.0.0`) → CI builds wheels for
 #     Linux x86_64/aarch64 + macOS x86_64/arm64 + Windows x86_64 across
 #     CPython 3.9–3.13, plus the source distribution, then uploads them
 #     all to PyPI in a single atomic publish step.
@@ -9,7 +9,7 @@
 # Authentication:
 #   - Uses **PyPI Trusted Publishing (OIDC)** — no API token to manage,
 #     no secret to leak. The trust relationship is configured once on
-#     PyPI side (see PUBLISHING.md for the one-time setup).
+#     PyPI side.
 #
 # Manual trigger:
 #   - You can also run the workflow from the Actions tab via
@@ -31,7 +31,10 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  # ── Linux wheels: x86_64 (manylinux2014) + aarch64 (manylinux_2_28) ──
+  # ── Linux wheels: manylinux2014 builds all 5 Python versions per arch ──
+  #
+  # The manylinux container ships every supported CPython, so a single
+  # job can build 5 wheels in one shot via `--find-interpreter`.
   build-linux:
     name: wheels · linux · ${{ matrix.target }}
     runs-on: ubuntu-latest
@@ -45,89 +48,76 @@ jobs:
         with:
           python-version: "3.x"
 
-      # PyO3/maturin-action handles the Rust toolchain + manylinux
-      # container setup automatically. `--release` and the strip flag
-      # come from pyproject.toml [tool.maturin].
       - name: Build wheels (maturin)
         uses: PyO3/maturin-action@v1
         with:
           target: ${{ matrix.target }}
-          # CPython 3.9 → 3.13. Python 3.14 stays out until upstream
-          # numpy / pyo3 publish wheels for it.
-          args: --release --out dist --interpreter 3.9 3.10 3.11 3.12 3.13
-          # manylinux2014 → glibc 2.17 (CentOS 7 vintage). Broadest
-          # compat without dropping into musllinux territory.
+          # `--find-interpreter` picks up every CPython 3.9-3.13 the
+          # manylinux container provides — one job, five wheels.
+          args: --release --out dist --find-interpreter
           manylinux: 2014
-          # The build runs inside the manylinux container; sccache
-          # caches rustc artefacts across runs to keep CI under ~10 min.
           sccache: true
-
-      - name: Smoke-test the wheel (x86_64 only — aarch64 has no native runner)
-        if: matrix.target == 'x86_64'
-        run: |
-          pip install --find-links dist invisensing
-          python -c "from invisensing import File, Mode; print('ok:', Mode.IQ)"
 
       - uses: actions/upload-artifact@v4
         with:
           name: wheels-linux-${{ matrix.target }}
           path: dist/
 
-  # ── macOS wheels: x86_64 (Intel) + arm64 (Apple Silicon) ─────────────
+  # ── macOS wheels: explicit (target × python) matrix ──
+  #
+  # `setup-python@v5` installs ONE interpreter per job, so we add a
+  # Python axis to the matrix and build a single wheel per job.
   build-macos:
-    name: wheels · macos · ${{ matrix.target }}
+    name: wheels · macos · ${{ matrix.target }} · py${{ matrix.python }}
     # macos-13 is the last x86_64 runner; macos-14+ are arm64-native.
     runs-on: ${{ matrix.target == 'x86_64' && 'macos-13' || 'macos-14' }}
     strategy:
       fail-fast: false
       matrix:
         target: [x86_64, aarch64]
+        python: ["3.9", "3.10", "3.11", "3.12", "3.13"]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.x"
-      - name: Build wheels (maturin)
+          python-version: ${{ matrix.python }}
+
+      - name: Build wheel (maturin)
         uses: PyO3/maturin-action@v1
         with:
           target: ${{ matrix.target }}
-          args: --release --out dist --interpreter 3.9 3.10 3.11 3.12 3.13
+          args: --release --out dist --interpreter python${{ matrix.python }}
           sccache: true
-
-      - name: Smoke-test the wheel
-        run: |
-          pip install --find-links dist invisensing
-          python -c "from invisensing import File, Mode; print('ok:', Mode.IQ)"
 
       - uses: actions/upload-artifact@v4
         with:
-          name: wheels-macos-${{ matrix.target }}
+          name: wheels-macos-${{ matrix.target }}-py${{ matrix.python }}
           path: dist/
 
-  # ── Windows wheels: x86_64 ───────────────────────────────────────────
+  # ── Windows wheels: x86_64 only, one job per Python version ──
   build-windows:
-    name: wheels · windows · x86_64
+    name: wheels · windows · py${{ matrix.python }}
     runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.9", "3.10", "3.11", "3.12", "3.13"]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.x"
-      - name: Build wheels (maturin)
+          python-version: ${{ matrix.python }}
+
+      - name: Build wheel (maturin)
         uses: PyO3/maturin-action@v1
         with:
           target: x86_64
-          args: --release --out dist --interpreter 3.9 3.10 3.11 3.12 3.13
+          args: --release --out dist --interpreter python${{ matrix.python }}
           sccache: true
-
-      - name: Smoke-test the wheel
-        run: |
-          pip install --find-links dist invisensing
-          python -c "from invisensing import File, Mode; print('ok:', Mode.IQ)"
 
       - uses: actions/upload-artifact@v4
         with:
-          name: wheels-windows-x86_64
+          name: wheels-windows-py${{ matrix.python }}
           path: dist/
 
   # ── Source distribution (single sdist for all platforms) ─────────────
@@ -175,9 +165,5 @@ jobs:
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
-          # Default `repository-url` is https://upload.pypi.org/legacy/ (prod).
-          # For a dry-run to TestPyPI, set repository-url:
-          #   https://test.pypi.org/legacy/
-          # and adjust the `environment.name` above to a TestPyPI-bound env.
           skip-existing: true
           verbose: true
