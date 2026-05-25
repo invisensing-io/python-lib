@@ -1,0 +1,163 @@
+# Build wheels and publish to **TestPyPI** (test.pypi.org) on demand.
+#
+# Trigger:
+#   - Manual only (Actions tab → "Release to TestPyPI" → Run workflow).
+#     Pick a ref (branch or tag) to build from. No tag push required —
+#     useful for verifying the release pipeline without committing to
+#     a real version number on PyPI proper.
+#
+# Authentication:
+#   - Uses TestPyPI's own Trusted Publishing (OIDC). The trust
+#     relationship must be configured separately on test.pypi.org
+#     (see the comment on the `publish` job below).
+#
+# Version policy:
+#   - PyPI/TestPyPI versions are immutable. If you want to iterate
+#     ("rebuild and re-publish") you must bump the version each time.
+#     Standard practice: use a pre-release suffix while testing —
+#     `1.0.0a1`, `1.0.0rc1`, `1.0.0.dev1`, etc. (PEP 440).
+#   - Edit `pyproject.toml` + `Cargo.toml` to a fresh pre-release
+#     before running, otherwise TestPyPI will reject the upload as
+#     a duplicate.
+
+name: Release to TestPyPI
+
+on:
+  workflow_dispatch: {}
+
+concurrency:
+  group: release-testpypi-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  # ── Linux wheels: 2 archs × cp39-cp313 ──
+  build-linux:
+    name: wheels · linux · ${{ matrix.target }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [x86_64, aarch64]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+      - name: Build wheels (maturin)
+        uses: PyO3/maturin-action@v1
+        with:
+          target: ${{ matrix.target }}
+          args: --release --out dist --interpreter 3.9 3.10 3.11 3.12 3.13
+          manylinux: 2014
+          sccache: true
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheels-linux-${{ matrix.target }}
+          path: dist/
+
+  # ── macOS wheels: target × python ──
+  build-macos:
+    name: wheels · macos · ${{ matrix.target }} · py${{ matrix.python }}
+    runs-on: ${{ matrix.target == 'x86_64' && 'macos-13' || 'macos-14' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [x86_64, aarch64]
+        python: ["3.9", "3.10", "3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Build wheel (maturin)
+        uses: PyO3/maturin-action@v1
+        with:
+          target: ${{ matrix.target }}
+          args: --release --out dist --interpreter python${{ matrix.python }}
+          sccache: true
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheels-macos-${{ matrix.target }}-py${{ matrix.python }}
+          path: dist/
+
+  # ── Windows wheels: x86_64 × python ──
+  build-windows:
+    name: wheels · windows · py${{ matrix.python }}
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.9", "3.10", "3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Build wheel (maturin)
+        uses: PyO3/maturin-action@v1
+        with:
+          target: x86_64
+          args: --release --out dist --interpreter python${{ matrix.python }}
+          sccache: true
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheels-windows-py${{ matrix.python }}
+          path: dist/
+
+  # ── Source distribution ──
+  build-sdist:
+    name: sdist
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build sdist (maturin)
+        uses: PyO3/maturin-action@v1
+        with:
+          command: sdist
+          args: --out dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sdist
+          path: dist/
+
+  # ── Publish to TestPyPI ──
+  #
+  # One-time setup on test.pypi.org:
+  #   1. Sign in (separate account from pypi.org — same email is fine).
+  #   2. https://test.pypi.org/manage/account/publishing/ → Add a
+  #      pending publisher with:
+  #        - PyPI Project Name: invisensing
+  #        - Owner: invisensing-io
+  #        - Repository name: python-lib
+  #        - Workflow name: release-testpypi.yml
+  #        - Environment name: testpypi
+  #
+  # One-time setup on GitHub:
+  #   - Settings → Environments → New environment named "testpypi"
+  #     (optionally with required reviewers as for the prod env).
+  publish:
+    name: publish to TestPyPI
+    needs: [build-linux, build-macos, build-windows, build-sdist]
+    runs-on: ubuntu-latest
+    environment:
+      name: testpypi
+      url: https://test.pypi.org/p/invisensing
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - name: Download all build artefacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: List what's about to be published
+        run: ls -la dist/
+
+      - name: Publish to TestPyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          repository-url: https://test.pypi.org/legacy/
+          skip-existing: true
+          verbose: true
