@@ -33,8 +33,11 @@ concurrency:
 jobs:
   # ── Linux wheels: manylinux2014 builds all 5 Python versions per arch ──
   #
-  # The manylinux container ships every supported CPython, so a single
-  # job can build 5 wheels in one shot via `--find-interpreter`.
+  # The manylinux container ships every supported CPython, including
+  # 3.14 — but PyO3 0.24 only supports up to 3.13, so we must list the
+  # interpreters explicitly (not `--find-interpreter`, which would pull
+  # 3.14 and fail with "configured Python interpreter version (3.14)
+  # is newer than PyO3's maximum supported version (3.13)").
   build-linux:
     name: wheels · linux · ${{ matrix.target }}
     runs-on: ubuntu-latest
@@ -52,9 +55,9 @@ jobs:
         uses: PyO3/maturin-action@v1
         with:
           target: ${{ matrix.target }}
-          # `--find-interpreter` picks up every CPython 3.9-3.13 the
-          # manylinux container provides — one job, five wheels.
-          args: --release --out dist --find-interpreter
+          # Explicit list — one job builds 5 wheels (cp39-cp313). When
+          # we bump to PyO3 >= 0.25 we can add 3.14 here too.
+          args: --release --out dist --interpreter 3.9 3.10 3.11 3.12 3.13
           manylinux: 2014
           sccache: true
 
