@@ -1,0 +1,106 @@
+# MkDocs configuration for the Invisensing Python SDK documentation.
+#
+# Build locally:
+#     pip install invisensing[docs]
+#     mkdocs serve            # live preview on http://127.0.0.1:8000
+#     mkdocs build            # static site in site/
+#
+# Deploy:
+#     handled by .github/workflows/docs.yml on every push to master.
+
+site_name: Invisensing Python SDK
+site_description: Python library for reading PCIe7821 DAS acquisition files (DAT / HDF5 / TDMS / SEG-Y).
+site_url: https://invisensing-io.github.io/python-lib/
+repo_url: https://github.com/invisensing-io/python-lib
+repo_name: invisensing-io/python-lib
+edit_uri: edit/master/docs/
+
+# Material is the de-facto standard for Python lib docs (FastAPI,
+# Pydantic, etc.). Looks polished without per-page styling work.
+theme:
+  name: material
+  features:
+    - navigation.tabs
+    - navigation.sections
+    - navigation.expand
+    - navigation.top
+    - search.suggest
+    - search.highlight
+    - content.code.copy
+    - content.code.annotate
+    - toc.follow
+  palette:
+    - scheme: default
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/weather-sunny
+        name: Switch to dark mode
+    - scheme: slate
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/weather-night
+        name: Switch to light mode
+  font:
+    text: Inter
+    code: JetBrains Mono
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - md_in_html
+  - tables
+  - toc:
+      permalink: true
+  - pymdownx.details
+  - pymdownx.highlight:
+      anchor_linenums: true
+      line_spans: __span
+      pygments_lang_class: true
+  - pymdownx.inlinehilite
+  - pymdownx.snippets
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
+  - pymdownx.tabbed:
+      alternate_style: true
+
+plugins:
+  - search
+  # mkdocstrings auto-generates the API reference from the live module's
+  # docstrings — the docs build imports `invisensing` (which means the
+  # docs CI must `maturin develop` the Rust extension first).
+  - mkdocstrings:
+      handlers:
+        python:
+          options:
+            docstring_style: google
+            show_source: false
+            show_root_heading: true
+            show_root_full_path: false
+            show_object_full_path: false
+            show_symbol_type_heading: true
+            show_symbol_type_toc: true
+            show_if_no_docstring: false
+            separate_signature: true
+            merge_init_into_class: true
+            inherited_members: false
+            members_order: source
+            filters:
+              - "!^_"  # hide private members starting with _
+
+nav:
+  - Home: index.md
+  - Guide: guide.md
+  - Examples: examples.md
+  - API Reference: api.md
+
+extra:
+  social:
+    - icon: fontawesome/brands/github
+      link: https://github.com/invisensing-io/python-lib
+    - icon: fontawesome/brands/python
+      link: https://pypi.org/project/invisensing/

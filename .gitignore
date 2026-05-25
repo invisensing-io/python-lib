@@ -29,6 +29,7 @@ tests/output/
 
 # Generated docs
 Docs/*
+site/
 
 # Internal release runbook — kept locally for the maintainer, never pushed
 PUBLISHING.md

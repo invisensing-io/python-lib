@@ -5,7 +5,7 @@ build-backend = "maturin"
 [project]
 name = "invisensing"
 version = "1.0.1"
-description = "Python SDK for the Invisensing Audace DAS environment — reads PCIe7821 acquisition files (DAT / HDF5 / TDMS / SEG-Y) and extracts per-channel data (I / Q / arctan / magnitude / phase) via a Rust-backed core."
+description = "Python SDK for the Invisensing Audace DAS environment — reads Audace data files (DAT / HDF5 / TDMS / SEG-Y) and extracts per-channel data (I / Q / arctan / magnitude / phase) via a Rust-backed core."
 readme = "README.md"
 requires-python = ">=3.9"
 license = "MIT"
@@ -75,6 +75,12 @@ tdms = ["npTDMS>=1.6"]
 segy = ["segyio>=1.9"]
 all  = ["h5py>=3.0", "npTDMS>=1.6", "segyio>=1.9"]
 dev  = ["pytest>=8.0", "maturin>=1.5"]
+docs = [
+    "mkdocs>=1.6",
+    "mkdocs-material>=9.5",
+    "mkdocstrings[python]>=0.26",
+    "pymdown-extensions>=10.7",
+]
 
 [tool.maturin]
 # `python-source = "python"` tells maturin where the pure-Python package lives;

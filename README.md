@@ -10,7 +10,7 @@ optional physical-unit scaling.
 
 The library is **format-agnostic but mode-faithful**: it never
 silently re-derives one demodulation product from another. The
-on-board PCIe7821 DSP chain (fading suppression, spatial differential,
+on-board DAQ DSP chain (fading suppression, spatial differential,
 detrend filter) is not reproducible in software from an earlier tap,
 so the channel you can extract is the one the FPGA wrote. Inspect
 ``file.mode`` to dispatch; the SDK raises a clear `ValueError` if you
