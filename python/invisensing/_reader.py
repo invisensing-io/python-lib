@@ -431,6 +431,19 @@ class File:
         """Reset the read cursor back to the start of the sample stream."""
         self._backend.rewind()
 
+    def seek_lines(self, n: int) -> None:
+        """Move the read cursor to pulse ``n`` (0-based) without reading the
+        skipped pulses.
+
+        For ``.dat``/``.hdf5`` this is an O(1) seek; the next
+        :meth:`read_lines` continues from ``n``. ``n`` is clamped to
+        :attr:`num_lines`. Lets a viewer jump to ``--start-time`` on a
+        multi-GB file without streaming past the skipped data.
+        """
+        if n < 0:
+            raise ValueError("n must be >= 0")
+        self._backend.seek(int(n))
+
     # ── Channel extractors ─────────────────────────────────────────────
     #
     # Each extractor accepts an optional pre-read array. Passing ``None``

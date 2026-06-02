@@ -20,6 +20,7 @@ import pytest
 from invisensing import (
     File,
     Mode,
+    export_dat,
     FLAG_DEMODULATED,
     FLAG_FLOAT,
     FLAG_INTERLEAVED,
@@ -143,3 +144,44 @@ def test_tdms_iq_round_trip(nptdms_or_skip):
             buf = f.read_all()
             np.testing.assert_array_equal(f.get_i(buf), i)
             np.testing.assert_array_equal(f.get_q(buf), q)
+
+
+# ── seek_lines (additive in 1.1.0) ─────────────────────────────────────────
+
+
+def test_seek_lines_dat():
+    """`seek_lines` on a .dat positions the cursor so the next read matches
+    a full read sliced from the same offset, and clamps past EOF."""
+    rows, line_size = 300, 16
+    data = np.arange(rows * line_size, dtype=np.int16).reshape(rows, line_size)
+    with tempfile.TemporaryDirectory() as d:
+        path = Path(d) / "seek.dat"
+        export_dat(path, data, sample_rate=1_000_000, trig_frequency=1_000, range_v=1.0)
+        with File(path) as f:
+            full = f.read_all()
+        with File(path) as f:
+            f.seek_lines(123)
+            assert f.lines_left == rows - 123
+            np.testing.assert_array_equal(f.read_all(), full[123:])
+        with File(path) as f:
+            f.seek_lines(10 * rows)  # clamp
+            assert f.lines_left == 0
+
+
+def test_seek_lines_hdf5(h5py_or_skip):
+    h5py = h5py_or_skip
+    rows, positions = 50, 8
+    arr = np.arange(rows * positions, dtype=np.int16).reshape(rows, positions)
+    with tempfile.TemporaryDirectory() as d:
+        path = Path(d) / "seek.h5"
+        with h5py.File(str(path), "w") as fp:
+            fp.create_dataset("acoustic_data", data=arr)
+            fp.attrs["line_size"] = positions
+            fp.attrs["trig_frequency"] = 1_000
+            fp.attrs["sample_size"] = 2
+            fp.attrs["sample_rate"] = 1_000_000
+            fp.attrs["flags"] = 0
+        with File(path) as f:
+            f.seek_lines(20)
+            assert f.lines_left == rows - 20
+            np.testing.assert_array_equal(f.read_all(), arr[20:])

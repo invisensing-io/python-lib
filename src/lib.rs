@@ -357,6 +357,22 @@ impl DatReader {
         Ok(())
     }
 
+    /// Move the read cursor to pulse `n` (0-based) without reading the
+    /// skipped samples — an O(1) `seek` past the header plus `n` lines.
+    /// `n` is clamped to `num_lines`; `lines_left` is updated to match.
+    /// Subsequent `read_lines` continues from `n`.
+    #[pyo3(signature = (n))]
+    fn seek_lines(&mut self, n: u64) -> PyResult<()> {
+        let n = n.min(self.num_lines);
+        let bytes_per_line = (self.header.line_size as u64) * (self.header.sample_size as u64);
+        let offset = HEADER_SIZE as u64 + n.saturating_mul(bytes_per_line);
+        self.reader
+            .seek(SeekFrom::Start(offset))
+            .map_err(|e| PyIOError::new_err(format!("seek failed: {e}")))?;
+        self.lines_left = self.num_lines - n;
+        Ok(())
+    }
+
     /// Read up to `n` pulses of samples and return them as a `(rows,
     /// line_size)` numpy array. The dtype is picked from
     /// `(sample_size, FLOAT)` — matches the FileWriter convention so the

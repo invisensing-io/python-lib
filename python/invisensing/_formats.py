@@ -56,6 +56,9 @@ class _DatBackend:
     def rewind(self) -> None:
         self._inner.rewind()
 
+    def seek(self, n: int) -> None:
+        self._inner.seek_lines(int(n))
+
 
 # ── HDF5 — via h5py ────────────────────────────────────────────────────────
 #
@@ -127,6 +130,9 @@ class _Hdf5Backend:
     def rewind(self) -> None:
         self._cursor = 0
 
+    def seek(self, n: int) -> None:
+        self._cursor = max(0, min(int(n), self.num_lines))
+
     def __del__(self):
         # h5py.File.close() is idempotent; guard against partial init.
         f = getattr(self, "_file", None)
@@ -157,7 +163,10 @@ class _TdmsBackend:
                 "`pip install invisensing`. If you installed with --no-deps, "
                 "run `pip install npTDMS` (or `pip install invisensing[tdms]`)."
             ) from exc
-        self._tdms = TdmsFile.read(str(path))
+        # `open` keeps the file handle and reads metadata only — sample
+        # data is fetched lazily per `read_data(offset, length)`, so a
+        # multi-GB TDMS no longer has to fit in RAM.
+        self._tdms = TdmsFile.open(str(path))
         props = self._tdms.properties
         line_size = int(props["line_size"])
         sample_size = int(props["sample_size"])
@@ -172,28 +181,17 @@ class _TdmsBackend:
             num_channels=int(props.get("num_channels", 1)),
             timestamp=str(props.get("timestamp", "")),
         )
-
-        # nptdms returns a flat 1-D array — reshape into (rows, line_size)
-        # so the API matches the other backends.
-        ch = self._find_channel()
-        flat = np.asarray(ch[:])
-        n_lines = flat.size // line_size
-        self._data = flat[: n_lines * line_size].reshape(n_lines, line_size)
+        self._line_size = line_size
+        self._channel = self._find_channel()
+        self._num_lines = int(len(self._channel)) // line_size
         self._cursor = 0
 
     def _find_channel(self):
         """Locate `acoustic_data` whichever group nptdms reports."""
-        if self.GROUP_NAME in self._tdms.groups()[0].name and self.GROUP_NAME in [
-            g.name for g in self._tdms.groups()
-        ]:
-            group = self._tdms[self.GROUP_NAME]
-        else:
-            # Fall back to the first group — the Audace producer writes
-            # a single group today, but a future revision might rename it.
-            group = self._tdms.groups()[0]
-        if self.CHANNEL_NAME in [c.name for c in group.channels()]:
-            return group[self.CHANNEL_NAME]
-        return group.channels()[0]
+        groups = self._tdms.groups()
+        group = next((g for g in groups if g.name == self.GROUP_NAME), groups[0])
+        channels = group.channels()
+        return next((c for c in channels if c.name == self.CHANNEL_NAME), channels[0])
 
     @property
     def header(self) -> Header:
@@ -201,11 +199,11 @@ class _TdmsBackend:
 
     @property
     def num_lines(self) -> int:
-        return int(self._data.shape[0])
+        return self._num_lines
 
     @property
     def lines_left(self) -> int:
-        return max(0, self.num_lines - self._cursor)
+        return max(0, self._num_lines - self._cursor)
 
     def read_lines(self, n: int) -> np.ndarray:
         if n <= 0:
@@ -213,12 +211,25 @@ class _TdmsBackend:
         if self.lines_left == 0:
             raise OSError("end of file")
         n = min(n, self.lines_left)
-        out = self._data[self._cursor : self._cursor + n].copy()
+        offset = self._cursor * self._line_size
+        length = n * self._line_size
+        flat = np.asarray(self._channel.read_data(offset, length))
         self._cursor += n
-        return out
+        return flat[: n * self._line_size].reshape(n, self._line_size)
 
     def rewind(self) -> None:
         self._cursor = 0
+
+    def seek(self, n: int) -> None:
+        self._cursor = max(0, min(int(n), self._num_lines))
+
+    def __del__(self):
+        tdms = getattr(self, "_tdms", None)
+        if tdms is not None:
+            try:
+                tdms.close()
+            except Exception:
+                pass
 
 
 # ── SEG-Y — via segyio ─────────────────────────────────────────────────────
@@ -255,13 +266,20 @@ class _SegyBackend:
         samples_per_trace = _scan_segy_text_int(text, "SAMPLES PER TRACE")
         timestamp = _scan_segy_text_str(text, "TIMESTAMP")
 
-        # bytes per sample comes from segyio's format code.
+        # bytes per sample comes from segyio's format code. Enum member
+        # names follow segyio's SEG-Y revision wording (SIGNED_*_BYTE).
         fmt_to_bytes = {
-            segyio.SegySampleFormat.INT8: 1,
-            segyio.SegySampleFormat.INT16: 2,
-            segyio.SegySampleFormat.INT32: 4,
+            segyio.SegySampleFormat.SIGNED_CHAR_1_BYTE: 1,
+            segyio.SegySampleFormat.UNSIGNED_CHAR_1_BYTE: 1,
+            segyio.SegySampleFormat.SIGNED_SHORT_2_BYTE: 2,
+            segyio.SegySampleFormat.UNSIGNED_SHORT_2_BYTE: 2,
+            segyio.SegySampleFormat.SIGNED_INTEGER_4_BYTE: 4,
+            segyio.SegySampleFormat.UNSIGNED_INTEGER_4_BYTE: 4,
+            segyio.SegySampleFormat.SIGNED_INTEGER_8_BYTE: 8,
+            segyio.SegySampleFormat.UNSIGNED_INTEGER_8_BYTE: 8,
             segyio.SegySampleFormat.IEEE_FLOAT_4_BYTE: 4,
             segyio.SegySampleFormat.IEEE_FLOAT_8_BYTE: 8,
+            segyio.SegySampleFormat.IBM_FLOAT_4_BYTE: 4,
         }
         sample_size = fmt_to_bytes.get(self._segy.format, 4)
 
@@ -285,17 +303,11 @@ class _SegyBackend:
             timestamp=timestamp or "",
         )
 
-        # Load the whole trace block at once — segyio is fast enough at
-        # this and the per-trace cursor would otherwise need a SEG-Y
-        # iterator that's awkward to chunk by `n`.
-        # `tracedata` is (num_traces, samples_per_trace).
-        traces = self._segy.trace.raw[:]
-        # Cast to the dtype matching (sample_size, FLOAT). segyio returns
-        # float32 by default for IEEE-FLOAT files, which is what we want.
-        if not self._header.is_float and sample_size in (2, 4, 8):
-            np_kind = "int"
-            traces = traces.astype(f"{np_kind}{sample_size * 8}")
-        self._data = np.ascontiguousarray(traces)
+        # Traces are read lazily, one chunk per `read_lines`, via segyio's
+        # `trace.raw[start:stop]` -- a multi-GB SEG-Y no longer has to fit
+        # in RAM. We only cast to the integer dtype on the (small) chunk.
+        self._sample_size = sample_size
+        self._num_lines = int(self._segy.tracecount)
         self._cursor = 0
 
     @property
@@ -304,11 +316,11 @@ class _SegyBackend:
 
     @property
     def num_lines(self) -> int:
-        return int(self._data.shape[0])
+        return self._num_lines
 
     @property
     def lines_left(self) -> int:
-        return max(0, self.num_lines - self._cursor)
+        return max(0, self._num_lines - self._cursor)
 
     def read_lines(self, n: int) -> np.ndarray:
         if n <= 0:
@@ -316,12 +328,18 @@ class _SegyBackend:
         if self.lines_left == 0:
             raise OSError("end of file")
         n = min(n, self.lines_left)
-        out = self._data[self._cursor : self._cursor + n].copy()
+        # `trace.raw[start:stop]` -> (n, samples_per_trace) float32.
+        block = np.asarray(self._segy.trace.raw[self._cursor : self._cursor + n])
         self._cursor += n
-        return out
+        if not self._header.is_float and self._sample_size in (2, 4, 8):
+            block = block.astype(f"int{self._sample_size * 8}")
+        return np.ascontiguousarray(block)
 
     def rewind(self) -> None:
         self._cursor = 0
+
+    def seek(self, n: int) -> None:
+        self._cursor = max(0, min(int(n), self._num_lines))
 
     def __del__(self):
         segy = getattr(self, "_segy", None)
