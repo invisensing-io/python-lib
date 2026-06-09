@@ -67,6 +67,25 @@ mod offsets {
     pub const RANGE: usize = 52;
     pub const PULSE_WIDTH: usize = 56;
     pub const NUM_CHANNELS: usize = 60;
+    pub const CONTENT_TYPE: usize = 64; // u8 (carved out of the old reserved region)
+}
+
+/// Lowercase tag for a `content_type` byte (mirrors `audace::types::ContentType`).
+pub fn content_type_tag(v: u8) -> &'static str {
+    match v {
+        1 => "raw",
+        2 => "hw_phase",
+        3 => "hw_arctan",
+        4 => "hw_arctan_dui",
+        5 => "hw_amplitude",
+        6 => "interleaved_hw_iq",
+        7 => "interleaved_hw_arctan_amplitude",
+        8 => "interleaved_hw_phase_amplitude",
+        9 => "sw_mozart",
+        10 => "sw_phase",
+        11 => "sw_amplitude",
+        _ => "undefined",
+    }
 }
 
 /// Flag bits — must match the Audace wire-format `header_flags`
@@ -108,6 +127,12 @@ pub struct Header {
     pub range: i32,
     pub pulse_width: i32,
     pub num_channels: i32,
+    /// `content_type` descriptor byte (DataHeader byte 64). `0` = Undefined
+    /// (legacy capture). Use `content_type_name` for the lowercase tag.
+    pub content_type: u8,
+    /// Precise acquisition time in i64 nanoseconds (DataHeader timestamp bytes
+    /// [0..8]). `0` when the file uses the legacy ASCII timestamp string.
+    pub acquisition_ns: i64,
 }
 
 #[pymethods]
@@ -126,7 +151,10 @@ impl Header {
         pulse_width = 0,
         num_channels = 1,
         timestamp = String::new(),
+        content_type = 0,
+        acquisition_ns = 0,
     ))]
+    #[allow(clippy::too_many_arguments)]
     fn new(
         line_size: i32,
         trig_frequency: i32,
@@ -137,6 +165,8 @@ impl Header {
         pulse_width: i32,
         num_channels: i32,
         timestamp: String,
+        content_type: u8,
+        acquisition_ns: i64,
     ) -> Self {
         Self {
             timestamp,
@@ -148,7 +178,16 @@ impl Header {
             range,
             pulse_width,
             num_channels,
+            content_type,
+            acquisition_ns,
         }
+    }
+
+    /// Lowercase `content_type` tag (e.g. `"interleaved_hw_phase_amplitude"`,
+    /// `"undefined"` for legacy captures).
+    #[getter]
+    fn content_type_name(&self) -> &'static str {
+        content_type_tag(self.content_type)
     }
 
     /// True if the `INTERLEAVED` bit is set — the wire carries 2 samples
@@ -231,15 +270,35 @@ fn parse_header(bytes: &[u8]) -> PyResult<Header> {
         )));
     }
     let ts_raw = &bytes[offsets::TIMESTAMP..offsets::TIMESTAMP + 32];
-    // Trim trailing NULs / spaces, then lossily decode — the field is
-    // user-supplied so we never want to reject a file because of a
-    // mangled byte.
-    let end = ts_raw
-        .iter()
-        .rposition(|&b| b != 0 && b != b' ')
-        .map(|i| i + 1)
-        .unwrap_or(0);
-    let timestamp = String::from_utf8_lossy(&ts_raw[..end]).into_owned();
+    // Timestamp: the current format is an i64-ns value in bytes [0..8] with
+    // [8..32] left zero; legacy captures carried an ASCII string that always
+    // spilled past byte 8. Disambiguate on the [8..32] region. For the i64
+    // form we surface the raw nanoseconds in `acquisition_ns` and a decimal-ns
+    // `timestamp` string (no chrono dependency here); legacy files keep their
+    // free-form ASCII timestamp and `acquisition_ns = 0`.
+    // Plausible window for an i64-ns timestamp (≈ 2014..2103) — guards against a
+    // very short legacy ASCII string whose [8..32] also happens to be zero.
+    const ACQ_NS_MIN: i64 = 1_400_000_000_000_000_000;
+    const ACQ_NS_MAX: i64 = 4_200_000_000_000_000_000;
+    let i64_ns = if ts_raw[8..32].iter().all(|&b| b == 0) {
+        let ns = i64::from_le_bytes(ts_raw[0..8].try_into().unwrap());
+        if (ACQ_NS_MIN..=ACQ_NS_MAX).contains(&ns) { Some(ns) } else { None }
+    } else {
+        None
+    };
+    let (timestamp, acquisition_ns) =
+        if let Some(ns) = i64_ns {
+            (ns.to_string(), ns)
+        } else {
+            // Trim trailing NULs / spaces, then lossily decode — the field is
+            // user-supplied so we never reject a file over a mangled byte.
+            let end = ts_raw
+                .iter()
+                .rposition(|&b| b != 0 && b != b' ')
+                .map(|i| i + 1)
+                .unwrap_or(0);
+            (String::from_utf8_lossy(&ts_raw[..end]).into_owned(), 0i64)
+        };
 
     Ok(Header {
         timestamp,
@@ -251,6 +310,8 @@ fn parse_header(bytes: &[u8]) -> PyResult<Header> {
         range: read_i32_le(bytes, offsets::RANGE),
         pulse_width: read_i32_le(bytes, offsets::PULSE_WIDTH),
         num_channels: read_i32_le(bytes, offsets::NUM_CHANNELS),
+        content_type: bytes[offsets::CONTENT_TYPE],
+        acquisition_ns,
     })
 }
 
@@ -771,10 +832,18 @@ fn split_lane_into_vec<T: Copy + numpy::Element>(
 fn build_header_bytes<'py>(py: Python<'py>, header: &Header) -> PyResult<Bound<'py, PyBytes>> {
     let mut buf = [0u8; HEADER_SIZE];
 
-    // timestamp: 32 bytes, NUL-padded UTF-8.
-    let ts = header.timestamp.as_bytes();
-    let n = ts.len().min(32);
-    buf[..n].copy_from_slice(&ts[..n]);
+    // Timestamp: symmetric with `parse_header`. When the Header carries a
+    // precise i64-ns acquisition time, write it as little-endian i64 in [0..8]
+    // (leaving [8..32] zero, the new format). Otherwise fall back to the legacy
+    // NUL-padded UTF-8 string. Writing the decimal-ns string here would round-
+    // trip back as a *legacy* timestamp (acquisition_ns lost) — so don't.
+    if header.acquisition_ns != 0 {
+        buf[0..8].copy_from_slice(&header.acquisition_ns.to_le_bytes());
+    } else {
+        let ts = header.timestamp.as_bytes();
+        let n = ts.len().min(32);
+        buf[..n].copy_from_slice(&ts[..n]);
+    }
 
     let write = |buf: &mut [u8; HEADER_SIZE], offset: usize, v: i32| {
         buf[offset..offset + 4].copy_from_slice(&v.to_le_bytes());
@@ -787,6 +856,8 @@ fn build_header_bytes<'py>(py: Python<'py>, header: &Header) -> PyResult<Bound<'
     write(&mut buf, offsets::RANGE, header.range);
     write(&mut buf, offsets::PULSE_WIDTH, header.pulse_width);
     write(&mut buf, offsets::NUM_CHANNELS, header.num_channels);
+    // content_type descriptor (byte 64).
+    buf[offsets::CONTENT_TYPE] = header.content_type;
 
     Ok(PyBytes::new(py, &buf))
 }

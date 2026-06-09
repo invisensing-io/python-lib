@@ -69,7 +69,7 @@ from ._reader import (
 )
 from . import _legacy as _legacy_impl
 
-__version__ = "1.1.0"
+__version__ = "1.2.0"
 
 __all__ = [
     "File",
