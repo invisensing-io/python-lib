@@ -1,10 +1,14 @@
 # Build the MkDocs Material site and deploy it to GitHub Pages.
 #
 # Trigger:
-#   - Push to master / main → rebuild + redeploy.
-#   - Tagged release → rebuild + redeploy (so the docs version on the
-#     site matches the latest released wheel).
+#   - Push to master / main → rebuild + redeploy. (Release version bumps land
+#     on master before the tag, so this already covers released versions.)
 #   - Manual via Actions tab.
+#
+# NOT on tag pushes: the `github-pages` environment only permits deploys from
+# the default branch, so a tag-triggered deploy is rejected ("Tag … is not
+# allowed to deploy to github-pages due to environment protection rules"). The
+# master push that carries the version bump redeploys the docs anyway.
 #
 # The build step has to install the Rust extension because the API
 # reference (mkdocstrings) imports `invisensing` to introspect its
@@ -25,7 +29,6 @@ name: Deploy documentation
 on:
   push:
     branches: [master, main]
-    tags: ["v*"]
   workflow_dispatch: {}
 
 permissions:
