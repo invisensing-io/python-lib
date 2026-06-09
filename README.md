@@ -225,7 +225,33 @@ with File("acquisition.dat") as f:
     f.is_unsigned               # arctan/√ files only
     f.is_ac                     # ADC AC-coupled
     f.is_hiz                    # ADC high-impedance
+
+    # Full parsed header (byte-exact wire fields):
+    f.header.num_channels       # active socket channels (1 or 2)
+    f.header.content_type       # on-disk content descriptor byte (see below)
+    f.header.content_type_name  # lowercase tag, e.g. "sw_mozart" / "raw" / "undefined"
+    f.header.acquisition_ns     # precise acquisition time, i64 ns Unix (0 if legacy ASCII)
 ```
+
+### `content_type` — what the samples *are*
+
+The header carries a `content_type` byte (offset 64) describing the *meaning* of
+the samples, orthogonal to the width/sign `flags`. Legacy captures (which had no
+such byte) decode as `undefined` (0), so it is fully backward-compatible.
+
+```python
+with File("acquisition.dat") as f:
+    if f.header.content_type_name == "sw_mozart":
+        ...   # GPU Mozart software phase
+```
+
+Known tags: `raw`, `hw_phase`, `hw_arctan`, `hw_arctan_dui`, `hw_amplitude`,
+`interleaved_hw_iq`, `interleaved_hw_arctan_amplitude`,
+`interleaved_hw_phase_amplitude`, `sw_mozart`, `undefined`.
+
+The acquisition timestamp is also surfaced as a precise `i64` nanosecond Unix
+instant via `f.header.acquisition_ns` (it is `0` when the file used the legacy
+ASCII timestamp string, which is still readable through `f.timestamp`).
 
 ## Writing files
 
