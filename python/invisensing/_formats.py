@@ -365,24 +365,44 @@ def _scan_segy_text_int(text: str, marker: str, base: int = 10) -> Optional[int]
         if idx < 0:
             continue
         rest = line[idx + len(marker):]
-        # Walk past punctuation / words; pick the first run of [0-9a-fA-Fx]
-        token = ""
-        in_token = False
-        for ch in rest:
-            is_digit = ch.isdigit() or (
-                base == 16 and ch in "abcdefABCDEFxX"
-            )
-            if is_digit:
-                token += ch
-                in_token = True
-            elif in_token:
-                break
-        if not token:
-            continue
-        try:
-            return int(token, base)
-        except ValueError:
-            continue
+        if base == 16:
+            # The writer emits ``0x{:08X}`` — anchor on the ``0x`` prefix.
+            # Grabbing the first loose hex-letter run instead would parse
+            # prose around the value (e.g. the ``a`` of "(raw bits)") and
+            # return garbage flags for every SEG-Y produced by Filewriter.
+            pos = rest.find("0x")
+            if pos < 0:
+                pos = rest.find("0X")
+            if pos < 0:
+                continue
+            token = ""
+            for ch in rest[pos + 2:]:
+                if ch in "0123456789abcdefABCDEF":
+                    token += ch
+                else:
+                    break
+            if not token:
+                continue
+            try:
+                return int(token, 16)
+            except ValueError:
+                continue
+        else:
+            # base 10: first run of decimal digits after the marker.
+            token = ""
+            in_token = False
+            for ch in rest:
+                if ch.isdigit():
+                    token += ch
+                    in_token = True
+                elif in_token:
+                    break
+            if not token:
+                continue
+            try:
+                return int(token, base)
+            except ValueError:
+                continue
     return None
 
 
