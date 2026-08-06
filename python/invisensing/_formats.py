@@ -99,6 +99,9 @@ class _Hdf5Backend:
             pulse_width=int(attrs.get("pulse_width", 0)),
             num_channels=int(attrs.get("num_channels", 1)),
             timestamp=str(attrs.get("timestamp", "")),
+            # Absent on files written before the attribute existed; 0 is also
+            # the right answer for a capture taken with no pre-roll.
+            trigger_delay=int(attrs.get("trigger_delay", 0)),
         )
 
     @property
@@ -180,6 +183,7 @@ class _TdmsBackend:
             pulse_width=int(props.get("pulse_width", 0)),
             num_channels=int(props.get("num_channels", 1)),
             timestamp=str(props.get("timestamp", "")),
+            trigger_delay=int(props.get("trigger_delay", 0)),
         )
         self._line_size = line_size
         self._channel = self._find_channel()
@@ -262,6 +266,7 @@ class _SegyBackend:
         sample_rate = _scan_segy_text_int(text, "SAMPLE RATE")
         trig_freq = _scan_segy_text_int(text, "TRIGGER FREQUENCY")
         pulse_width = _scan_segy_text_int(text, "PULSE WIDTH")
+        trigger_delay = _scan_segy_text_int(text, "TRIGGER DELAY")
         voltage_mv = _scan_segy_text_int(text, "VOLTAGE RANGE")
         samples_per_trace = _scan_segy_text_int(text, "SAMPLES PER TRACE")
         timestamp = _scan_segy_text_str(text, "TIMESTAMP")
@@ -301,6 +306,7 @@ class _SegyBackend:
             pulse_width=int(pulse_width or 0),
             num_channels=1,
             timestamp=timestamp or "",
+            trigger_delay=int(trigger_delay or 0),
         )
 
         # Traces are read lazily, one chunk per `read_lines`, via segyio's
