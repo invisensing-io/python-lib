@@ -68,6 +68,10 @@ mod offsets {
     pub const PULSE_WIDTH: usize = 56;
     pub const NUM_CHANNELS: usize = 60;
     pub const CONTENT_TYPE: usize = 64; // u8 (carved out of the old reserved region)
+    /// u32 LE, carved out of the reserved region past the 16-byte card tag
+    /// (which occupies 65..81). Zero on captures written before the field
+    /// existed — and zero is also the right value for "no delay".
+    pub const TRIGGER_DELAY: usize = 84;
 }
 
 /// Lowercase tag for a `content_type` byte (mirrors `audace::types::ContentType`).
@@ -133,6 +137,12 @@ pub struct Header {
     /// Precise acquisition time in i64 nanoseconds (DataHeader timestamp bytes
     /// [0..8]). `0` when the file uses the legacy ASCII timestamp string.
     pub acquisition_ns: i64,
+    /// Trigger pre-roll in **samples** at `sample_rate` (DataHeader bytes
+    /// 84..88) — the unit the acquisition card is programmed in. `0` on
+    /// captures written before the field existed, which is also the value for
+    /// "no delay". Divide by `sample_rate` for seconds, or use
+    /// `trigger_delay_m` for metres of fibre.
+    pub trigger_delay: u32,
 }
 
 #[pymethods]
@@ -153,6 +163,7 @@ impl Header {
         timestamp = String::new(),
         content_type = 0,
         acquisition_ns = 0,
+        trigger_delay = 0,
     ))]
     #[allow(clippy::too_many_arguments)]
     fn new(
@@ -167,6 +178,7 @@ impl Header {
         timestamp: String,
         content_type: u8,
         acquisition_ns: i64,
+        trigger_delay: u32,
     ) -> Self {
         Self {
             timestamp,
@@ -180,6 +192,7 @@ impl Header {
             num_channels,
             content_type,
             acquisition_ns,
+            trigger_delay,
         }
     }
 
@@ -228,6 +241,38 @@ impl Header {
     #[getter]
     fn is_hiz(&self) -> bool {
         self.flags & flag_bits::HIZ != 0
+    }
+
+    /// Which demodulation pipeline produced these samples, or `None` when the
+    /// question does not apply.
+    ///
+    /// `True` = Mozart (GPU phase pipeline), `False` = Schubert (the legacy
+    /// CPU path). **`None` on raw data**: the distinction is carried by the
+    /// absence of the `MOZART` bit, not by a bit of its own, so on a raw ADC
+    /// capture — where no demodulation ran at all — "not Mozart" would read as
+    /// "Schubert" and name a pipeline that never executed. Callers must treat
+    /// `None` as "not applicable", not as a default.
+    #[getter]
+    fn is_mozart(&self) -> Option<bool> {
+        if self.flags & flag_bits::DEMODULATED == 0 {
+            return None;
+        }
+        Some(self.flags & flag_bits::MOZART != 0)
+    }
+
+    /// Trigger pre-roll expressed in metres of fibre, derived from
+    /// `trigger_delay` (samples) and `sample_rate`. `0` when the sample rate
+    /// is unknown, since the conversion is then undefined.
+    ///
+    /// Round-trip time is `2·m / c` with `c ≈ 2·10⁸ m/s` in silica, so
+    /// `m = samples · 10⁸ / sample_rate` — the same relation the Audace
+    /// control plane uses.
+    #[getter]
+    fn trigger_delay_m(&self) -> i64 {
+        if self.sample_rate <= 0 || self.trigger_delay == 0 {
+            return 0;
+        }
+        (self.trigger_delay as i64).saturating_mul(100_000_000) / self.sample_rate as i64
     }
 
     /// Physical spatial positions per pulse — `line_size / 2` when
@@ -312,6 +357,11 @@ fn parse_header(bytes: &[u8]) -> PyResult<Header> {
         num_channels: read_i32_le(bytes, offsets::NUM_CHANNELS),
         content_type: bytes[offsets::CONTENT_TYPE],
         acquisition_ns,
+        trigger_delay: u32::from_le_bytes(
+            bytes[offsets::TRIGGER_DELAY..offsets::TRIGGER_DELAY + 4]
+                .try_into()
+                .expect("4 bytes inside a >= 128-byte buffer"),
+        ),
     })
 }
 
@@ -858,6 +908,9 @@ fn build_header_bytes<'py>(py: Python<'py>, header: &Header) -> PyResult<Bound<'
     write(&mut buf, offsets::NUM_CHANNELS, header.num_channels);
     // content_type descriptor (byte 64).
     buf[offsets::CONTENT_TYPE] = header.content_type;
+    // Trigger pre-roll (bytes 84..88), u32 LE.
+    buf[offsets::TRIGGER_DELAY..offsets::TRIGGER_DELAY + 4]
+        .copy_from_slice(&header.trigger_delay.to_le_bytes());
 
     Ok(PyBytes::new(py, &buf))
 }

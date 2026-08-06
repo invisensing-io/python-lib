@@ -329,6 +329,32 @@ class File:
         return self._backend.header.range / 1000
 
     @property
+    def trigger_delay(self) -> int:
+        """Trigger pre-roll in samples at :attr:`sample_rate`.
+
+        ``0`` means no delay — which is also what captures written before the
+        field existed report, and for them it says the same thing.
+        """
+        return self._backend.header.trigger_delay
+
+    @property
+    def trigger_delay_m(self) -> int:
+        """:attr:`trigger_delay` expressed in metres of fibre."""
+        return self._backend.header.trigger_delay_m
+
+    @property
+    def is_mozart(self) -> Optional[bool]:
+        """Which demodulation pipeline ran, or ``None`` if none did.
+
+        ``True`` = Mozart, ``False`` = Schubert, ``None`` on raw data. The
+        distinction is carried by the *absence* of the ``MOZART`` bit rather
+        than by a bit of its own, so on a raw capture "not Mozart" would read
+        as "Schubert" and name a pipeline that never executed. Treat ``None``
+        as "not applicable", never as a default.
+        """
+        return self._backend.header.is_mozart
+
+    @property
     def dtype(self) -> np.dtype:
         """numpy dtype matching ``(sample_size, FLOAT)``."""
         return _dtype_for(self._backend.header)
