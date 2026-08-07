@@ -68,9 +68,10 @@ mod offsets {
     pub const PULSE_WIDTH: usize = 56;
     pub const NUM_CHANNELS: usize = 60;
     pub const CONTENT_TYPE: usize = 64; // u8 (carved out of the old reserved region)
-    /// u32 LE, carved out of the reserved region past the 16-byte card tag
-    /// (which occupies 65..81). Zero on captures written before the field
-    /// existed — and zero is also the right value for "no delay".
+    /// u32 LE metres of fibre, carved out of the reserved region past the
+    /// 16-byte card tag (which occupies 65..81). Zero on captures written
+    /// before the field existed — and zero is also the right value for
+    /// "no delay".
     pub const TRIGGER_DELAY: usize = 84;
 }
 
@@ -137,11 +138,13 @@ pub struct Header {
     /// Precise acquisition time in i64 nanoseconds (DataHeader timestamp bytes
     /// [0..8]). `0` when the file uses the legacy ASCII timestamp string.
     pub acquisition_ns: i64,
-    /// Trigger pre-roll in **samples** at `sample_rate` (DataHeader bytes
-    /// 84..88) — the unit the acquisition card is programmed in. `0` on
-    /// captures written before the field existed, which is also the value for
-    /// "no delay". Divide by `sample_rate` for seconds, or use
-    /// `trigger_delay_m` for metres of fibre.
+    /// Trigger pre-roll in **metres of fibre** (DataHeader bytes 84..88).
+    ///
+    /// Metres rather than a sample count: a count is only meaningful against
+    /// the rate it was counted at, and that is not always this header's
+    /// `sample_rate` (a decimating tap counts its delay in ADC clocks while
+    /// publishing the decimated rate). The producer converts. `0` means no
+    /// pre-roll, and is also what captures written before the field hold.
     pub trigger_delay: u32,
 }
 
@@ -258,21 +261,6 @@ impl Header {
             return None;
         }
         Some(self.flags & flag_bits::MOZART != 0)
-    }
-
-    /// Trigger pre-roll expressed in metres of fibre, derived from
-    /// `trigger_delay` (samples) and `sample_rate`. `0` when the sample rate
-    /// is unknown, since the conversion is then undefined.
-    ///
-    /// Round-trip time is `2·m / c` with `c ≈ 2·10⁸ m/s` in silica, so
-    /// `m = samples · 10⁸ / sample_rate` — the same relation the Audace
-    /// control plane uses.
-    #[getter]
-    fn trigger_delay_m(&self) -> i64 {
-        if self.sample_rate <= 0 || self.trigger_delay == 0 {
-            return 0;
-        }
-        (self.trigger_delay as i64).saturating_mul(100_000_000) / self.sample_rate as i64
     }
 
     /// Physical spatial positions per pulse — `line_size / 2` when

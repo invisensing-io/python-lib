@@ -330,17 +330,12 @@ class File:
 
     @property
     def trigger_delay(self) -> int:
-        """Trigger pre-roll in samples at :attr:`sample_rate`.
+        """Trigger pre-roll in **metres of fibre**.
 
         ``0`` means no delay — which is also what captures written before the
         field existed report, and for them it says the same thing.
         """
         return self._backend.header.trigger_delay
-
-    @property
-    def trigger_delay_m(self) -> int:
-        """:attr:`trigger_delay` expressed in metres of fibre."""
-        return self._backend.header.trigger_delay_m
 
     @property
     def is_mozart(self) -> Optional[bool]:
