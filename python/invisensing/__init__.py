@@ -69,7 +69,10 @@ from ._reader import (
 )
 from . import _legacy as _legacy_impl
 
-__version__ = "1.2.0"
+# Kept in step with pyproject.toml and Cargo.toml by
+# tests/test_version.py — on an isolated site this string is the only
+# way to tell which SDK is installed, so it must not drift again.
+__version__ = "1.2.1"
 
 __all__ = [
     "File",
@@ -129,7 +132,9 @@ __all__ = [
 #
 # The class-level attachments do not interfere with the modern API
 # because the class instances don't shadow class attributes by accident
-# (the instance attributes are ``_backend``, ``_path``, ``_closed``).
+# (the instance attributes are ``_backend``, ``_path``, ``_closed``,
+# ``_header`` and ``_num_lines`` — all underscored, none of them a
+# legacy name).
 
 
 def _install_legacy_shim():

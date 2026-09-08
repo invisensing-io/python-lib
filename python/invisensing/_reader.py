@@ -16,10 +16,16 @@ Usage::
             phase = f.get_phase()
         else:
             samples = f.read_lines(1000)
+
+The ``with`` block is not decoration: leaving it closes the underlying
+file descriptor there and then. Without it, call ``f.close()``. A closed
+file still describes itself (header, mode, shape, dtype…); only reading
+data from it raises.
 """
 
 from __future__ import annotations
 
+import warnings
 from enum import Enum
 from pathlib import Path
 from typing import Any, Iterator, Optional, Union
@@ -160,11 +166,40 @@ class File:
     identical across formats: same properties, same channel extractors,
     same numpy output shape.
 
-    Use it as a context manager so the underlying file handle is closed
-    cleanly even if an exception is raised::
+    Use it as a context manager. It is the only usage whose file
+    descriptor is released at a point *you* control rather than
+    whenever the garbage collector gets to the object::
 
         with File("acquisition.dat") as f:
             ...
+
+    Outside a ``with`` block, call :meth:`close` yourself; it is
+    idempotent. A :class:`File` that is neither closed nor used as a
+    context manager emits a :class:`ResourceWarning` when it is
+    collected — silent by default, shown under ``python -W default``,
+    ``python -X dev`` and pytest. This matters on a long-running
+    process walking a data tree: one leaked descriptor per file ends in
+    ``EMFILE``, and on an NFS/CIFS mount an open handle also blocks the
+    file from being deleted or replaced.
+
+    Closing releases the *descriptor*, and nothing else. The header was
+    read at open and is kept, so a closed :class:`File` still describes
+    the recording — :attr:`header`, :attr:`mode`, :attr:`num_lines`,
+    :attr:`sample_rate`, :attr:`dtype`, :attr:`duration`, the ``is_*``
+    predicates and the rest all keep answering, and asking them is not
+    an error::
+
+        with File("acquisition.dat") as f:
+            data = f.read_all()
+        dt = 1.0 / f.trig_frequency          # fine: metadata, not I/O
+
+    numpy arrays already returned by :meth:`read_lines` or the channel
+    extractors own their memory and remain valid and readable too.
+    Only an operation that would have to touch the file again —
+    :meth:`read_lines`, :meth:`read_all`, :meth:`rewind`,
+    :meth:`seek_lines`, iterating the file, and :attr:`lines_left`,
+    which is the cursor of a handle that no longer exists — raises
+    :class:`ValueError`.
 
     Parameters
     ----------
@@ -223,17 +258,65 @@ class File:
         self._backend = backend_cls(path)
         self._path = path
         self._closed = False
+        # Metadata is read once, here, and kept on the `File` itself.
+        # Describing a file needs the descriptor exactly once — at open.
+        # Everything downstream (mode, dtype, shape, duration, the flag
+        # predicates) is arithmetic on these two values, so it keeps
+        # answering after close(); see `close()` for why that matters.
+        self._header = self._backend.header
+        self._num_lines = int(self._backend.num_lines)
 
     # ── Lifecycle ──────────────────────────────────────────────────────
 
+    @property
+    def closed(self) -> bool:
+        """``True`` once :meth:`close` has run. Never resets."""
+        return bool(getattr(self, "_closed", True))
+
     def close(self) -> None:
-        """Release the underlying file handle. Safe to call multiple times."""
-        if self._closed:
+        """
+        Release the underlying OS file handle, immediately.
+
+        Idempotent: calling it a second time (or after a ``with``
+        block) is a no-op and never raises.
+
+        The reference to the backend is dropped *before* the handle is
+        closed, so the descriptor goes away at this call and not
+        whenever the garbage collector happens to reclaim this object.
+
+        Closing gives up the *descriptor*, not the *knowledge*. What was
+        already read stays readable: every metadata accessor
+        (:attr:`header`, :attr:`mode`, :attr:`num_lines`, :attr:`dtype`,
+        :attr:`shape`, :attr:`duration`, :attr:`distance`, the ``is_*``
+        predicates…) keeps answering from the values captured at open,
+        and numpy arrays already returned by :meth:`read_lines` (and the
+        channel extractors) own their memory and stay valid. Only what
+        genuinely needs the file back — :meth:`read_lines`,
+        :meth:`read_all`, :meth:`rewind`, :meth:`seek_lines`, iteration
+        and :attr:`lines_left` (the cursor of a handle that no longer
+        exists) — raises :class:`ValueError`.
+
+        One caveat, and it is the only case where the descriptor does
+        *not* go away at this call: closing a ``.dat`` while another
+        thread is inside :meth:`read_lines` on the *same* object. The
+        native reader is mutably borrowed for the length of that read,
+        so the release is deferred until it finishes; this call still
+        returns without raising, and a :class:`ResourceWarning` says so.
+        Do not share one :class:`File` across threads.
+        """
+        if getattr(self, "_closed", True):
             return
-        close_fn = getattr(self._backend, "close", None)
-        if callable(close_fn):
-            close_fn()
+        # Drop our reference FIRST. `File._backend` is the only one, so
+        # this is what actually releases the handle; the explicit
+        # `close()` below just makes the moment deterministic instead of
+        # leaving it to the refcount. Order also makes the method
+        # idempotent even if the backend's close were to raise.
+        backend, self._backend = getattr(self, "_backend", None), None
         self._closed = True
+        if backend is not None:
+            close_fn = getattr(backend, "close", None)
+            if callable(close_fn):
+                close_fn()
 
     def __enter__(self) -> "File":
         return self
@@ -242,13 +325,43 @@ class File:
         self.close()
 
     def __del__(self):
-        # Best-effort cleanup. The backend's own __del__ takes care of
-        # the underlying handle; this just suppresses double-close
-        # warnings if the user already called close() explicitly.
+        # Nothing here may raise: at interpreter shutdown module globals
+        # (including `warnings`) may already be None, hence the
+        # systematic getattr-with-default and the blanket guards.
         try:
+            if not getattr(self, "_closed", True):
+                try:
+                    warnings.warn(
+                        f"invisensing.File({getattr(self, '_path', '?')}) was not "
+                        "closed explicitly; use a `with` block or call .close()",
+                        ResourceWarning,
+                        stacklevel=2,
+                        source=self,
+                    )
+                except Exception:
+                    pass
             self.close()
         except Exception:
             pass
+
+    def _require_open(self):
+        """Return the live backend, or explain that the file is closed.
+
+        Guards *data* access only — anything that has to touch the file
+        again. Metadata read at open is answered from :attr:`header` and
+        never comes through here: raising on a question the object can
+        already answer would turn a correct script into a crash for no
+        gain. Without this guard a genuine use-after-close would surface
+        as ``AttributeError: 'NoneType' object has no attribute
+        'read_lines'``, which says nothing about what the caller did
+        wrong.
+        """
+        backend = getattr(self, "_backend", None)
+        if backend is None or getattr(self, "_closed", True):
+            raise ValueError(
+                f"operation on a closed File({getattr(self, '_path', '?')})"
+            )
+        return backend
 
     # ── Iteration ──────────────────────────────────────────────────────
 
@@ -257,9 +370,18 @@ class File:
         Iterate one pulse at a time. Equivalent to ``while
         f.lines_left: yield f.read_lines(1)[0]``. Useful for streaming
         processing over large files.
+
+        The backend is resolved once, at the first ``next()``, and the
+        loop then talks to it directly: at one pulse per iteration the
+        two per-pulse ``_require_open()`` checks were measurable (see
+        ``tests/test_performance.py::test_iteration_overhead_per_pulse``).
+        Closing the file mid-iteration is still caught — the backend
+        raises :class:`ValueError` on the very next read — it is just
+        reported by the backend instead of by the facade.
         """
-        while self.lines_left > 0:
-            yield self.read_lines(1)[0]
+        backend = self._require_open()
+        while backend.lines_left > 0:
+            yield backend.read_lines(1)[0]
 
     # ── Metadata (properties) ──────────────────────────────────────────
 
@@ -271,62 +393,68 @@ class File:
     @property
     def header(self) -> Header:
         """Parsed :class:`Header` (line_size, flags, rates, timestamp…)."""
-        return self._backend.header
+        return self._header
 
     @property
     def mode(self) -> Mode:
         """High-level acquisition mode — see :class:`Mode`."""
-        return Mode.from_flags(self._backend.header.flags)
+        return Mode.from_flags(self._header.flags)
 
     @property
     def line_size(self) -> int:
         """Wire-side samples per pulse (doubled when ``is_interleaved``)."""
-        return self._backend.header.line_size
+        return self._header.line_size
 
     @property
     def positions_per_line(self) -> int:
         """Spatial fibre positions per pulse — ``line_size / 2`` if INTERLEAVED."""
-        return self._backend.header.positions_per_line
+        return self._header.positions_per_line
 
     @property
     def sample_size(self) -> int:
         """Bytes per sample (2 for i16, 4 for i32/f32)."""
-        return self._backend.header.sample_size
+        return self._header.sample_size
 
     @property
     def sample_rate(self) -> int:
         """Wire-side sample rate in Hz."""
-        return self._backend.header.sample_rate
+        return self._header.sample_rate
 
     @property
     def trig_frequency(self) -> int:
         """Trigger pulse repetition rate in Hz."""
-        return self._backend.header.trig_frequency
+        return self._header.trig_frequency
 
     @property
     def num_lines(self) -> int:
         """Total trigger pulses recorded in the file."""
-        return self._backend.num_lines
+        return self._num_lines
 
     @property
     def lines_left(self) -> int:
-        """Pulses remaining behind the current read cursor."""
-        return self._backend.lines_left
+        """Pulses remaining behind the current read cursor.
+
+        This one *does* need the file open: it describes the position of
+        a live read cursor, not a property of the recording. On a closed
+        file it raises :class:`ValueError` — use :attr:`num_lines`, which
+        keeps answering, to describe what the file contains.
+        """
+        return self._require_open().lines_left
 
     @property
     def timestamp(self) -> str:
         """Acquisition start timestamp (free-form string from the producer)."""
-        return self._backend.header.timestamp
+        return self._header.timestamp
 
     @property
     def flags(self) -> int:
         """Raw header flag bitmask (see ``FLAG_*`` constants)."""
-        return self._backend.header.flags
+        return self._header.flags
 
     @property
     def range(self) -> float:
         """Voltage range in volts (header field is mV)."""
-        return self._backend.header.range / 1000
+        return self._header.range / 1000
 
     @property
     def trigger_delay(self) -> int:
@@ -335,7 +463,7 @@ class File:
         ``0`` means no delay — which is also what captures written before the
         field existed report, and for them it says the same thing.
         """
-        return self._backend.header.trigger_delay
+        return self._header.trigger_delay
 
     @property
     def is_mozart(self) -> Optional[bool]:
@@ -347,12 +475,12 @@ class File:
         as "Schubert" and name a pipeline that never executed. Treat ``None``
         as "not applicable", never as a default.
         """
-        return self._backend.header.is_mozart
+        return self._header.is_mozart
 
     @property
     def dtype(self) -> np.dtype:
         """numpy dtype matching ``(sample_size, FLOAT)``."""
-        return _dtype_for(self._backend.header)
+        return _dtype_for(self._header)
 
     @property
     def shape(self) -> tuple:
@@ -380,37 +508,37 @@ class File:
     @property
     def is_demodulated(self) -> _Flag:
         """True if the on-board DSP was used (PCIe7821 demod modes)."""
-        return _Flag(self._backend.header.is_demodulated)
+        return _Flag(self._header.is_demodulated)
 
     @property
     def is_interleaved(self) -> _Flag:
         """True if the wire carries 2 samples per spatial position."""
-        return _Flag(self._backend.header.is_interleaved)
+        return _Flag(self._header.is_interleaved)
 
     @property
     def is_float(self) -> _Flag:
         """True if samples are IEEE-754 floats."""
-        return _Flag(self._backend.header.is_float)
+        return _Flag(self._header.is_float)
 
     @property
     def is_phase(self) -> _Flag:
         """True if the file carries unwrapped DAS phase (rad)."""
-        return _Flag(self._backend.header.is_phase)
+        return _Flag(self._header.is_phase)
 
     @property
     def is_unsigned(self) -> _Flag:
         """True if the odd lane of an INTERLEAVED pair is u16 (magnitude)."""
-        return _Flag(self._backend.header.is_unsigned)
+        return _Flag(self._header.is_unsigned)
 
     @property
     def is_ac(self) -> _Flag:
         """True if the ADC was AC-coupled during acquisition."""
-        return _Flag(self._backend.header.is_ac)
+        return _Flag(self._header.is_ac)
 
     @property
     def is_hiz(self) -> _Flag:
         """True if the ADC ran in high-impedance mode."""
-        return _Flag(self._backend.header.is_hiz)
+        return _Flag(self._header.is_hiz)
 
     # ── Legacy aliases (kept stable forever) ───────────────────────────
 
@@ -435,7 +563,7 @@ class File:
         reader is already exhausted; raises :class:`ValueError` if
         ``n <= 0``.
         """
-        return self._backend.read_lines(n)
+        return self._require_open().read_lines(n)
 
     def read_all(self) -> np.ndarray:
         """
@@ -450,7 +578,7 @@ class File:
 
     def rewind(self) -> None:
         """Reset the read cursor back to the start of the sample stream."""
-        self._backend.rewind()
+        self._require_open().rewind()
 
     def seek_lines(self, n: int) -> None:
         """Move the read cursor to pulse ``n`` (0-based) without reading the
@@ -463,7 +591,7 @@ class File:
         """
         if n < 0:
             raise ValueError("n must be >= 0")
-        self._backend.seek(int(n))
+        self._require_open().seek(int(n))
 
     # ── Channel extractors ─────────────────────────────────────────────
     #
@@ -675,11 +803,19 @@ class File:
     # ── Introspection ──────────────────────────────────────────────────
 
     def __repr__(self) -> str:
+        # Debuggers call this on objects in any state, including one whose
+        # construction failed — never let it raise.
+        path = str(getattr(self, "_path", "?"))
+        if getattr(self, "_header", None) is None:
+            # Construction failed before the header was read.
+            return f"File({path!r}, unopened)"
+        state = ", closed" if self.closed else ""
         return (
-            f"File({str(self._path)!r}, mode={self.mode.value}, "
+            f"File({path!r}, mode={self.mode.value}, "
             f"shape={self.shape}, sample_rate={self.sample_rate} Hz, "
             f"trig_frequency={self.trig_frequency} Hz, "
-            f"duration={self.duration:.2f}s, distance={self.distance:.2f}m)"
+            f"duration={self.duration:.2f}s, distance={self.distance:.2f}m"
+            f"{state})"
         )
 
 

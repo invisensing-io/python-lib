@@ -261,3 +261,61 @@ def test_odd_line_size_on_interleaved_rejected_at_open(tmp_path: Path):
         fp.write(b"\x00" * 14)
     with pytest.raises(ValueError, match="INTERLEAVED"):
         File(path)
+
+
+def test_iteration_overhead_per_pulse(tmp_path: Path, capsys):
+    """`for pulse in f` must not pay the facade twice per pulse.
+
+    Iterating yields one pulse per call, so anything the facade does per
+    call is multiplied by the pulse count — 14 M of them on a 4 h capture
+    at 1 kHz. The first version of the close() fix routed both halves of
+    the loop (`self.lines_left` and `self.read_lines`) through
+    `File._require_open()`, which is two dict lookups and a raise-check
+    per pulse for nothing: the backend cannot change under the loop, and
+    if it does the very next backend call raises anyway.
+
+    The comparison is against the shape the loop used to have, measured
+    in this same process on this same file, so it does not depend on the
+    machine: the A/B is what is asserted, never an absolute time.
+    """
+    n_pulses = 20_000
+    positions = 256
+    path = tmp_path / "iter_overhead.dat"
+    _make_iq_file(path, n_pulses, positions)
+
+    def old_shape(f: File) -> int:
+        # Two File-level guarded accesses per pulse.
+        rows = 0
+        while f.lines_left > 0:
+            rows += f.read_lines(1)[0].shape[0]
+        return rows
+
+    def new_shape(f: File) -> int:
+        rows = 0
+        for pulse in f:
+            rows += pulse.shape[0]
+        return rows
+
+    best = {"old": float("inf"), "new": float("inf")}
+    counts = set()
+    for _ in range(5):
+        for name, loop in (("old", old_shape), ("new", new_shape)):
+            with File(path) as f:
+                t0 = time.perf_counter()
+                counts.add(loop(f))
+                best[name] = min(best[name], time.perf_counter() - t0)
+
+    # Both shapes must read the same thing, whatever they cost.
+    assert counts == {n_pulses * positions * 2}
+
+    with capsys.disabled():
+        print(
+            f"\n  iteration: {best['new']*1e3:.1f} ms vs {best['old']*1e3:.1f} ms "
+            f"for {n_pulses} pulses "
+            f"({(best['old']-best['new'])/n_pulses*1e6:+.3f} us/pulse saved)"
+        )
+    assert best["new"] <= best["old"], (
+        "File.__iter__ is now slower than the plain "
+        "`while f.lines_left: f.read_lines(1)` loop it exists to shorten — "
+        "the per-pulse work of the facade has grown."
+    )

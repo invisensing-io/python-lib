@@ -9,10 +9,30 @@ format-agnostic.
 The DAT backend skips third-party libs entirely — the Rust core's
 :class:`~invisensing._core.DatReader` is the fast path for what is by
 far the most common file in an Audace deployment.
+
+Every backend exposes the same lifecycle contract:
+
+* ``close()`` releases the underlying OS handle, is **idempotent**, and
+  never raises — calling it twice is a no-op.
+* after ``close()`` any read (``read_lines`` / ``rewind`` / ``seek`` /
+  ``lines_left``, the cursor of a handle that is gone) raises
+  :class:`ValueError`, never ``AttributeError`` and never a segfault
+  from the native side.
+* ``header`` and ``num_lines`` are captured at construction and keep
+  answering after ``close()``: they cost one descriptor, once, at open.
+  :class:`invisensing.File` copies them at open and serves its metadata
+  from that copy, so a closed file still describes itself.
+* ``__del__`` only delegates to ``close()`` as a last-resort safety net;
+  it is not the intended release path (see :class:`invisensing.File`).
+
+Arrays handed back by ``read_lines`` **own their memory** — none of the
+backends returns a view onto the still-open file — so a caller may keep
+reading its numpy arrays after the file has been closed.
 """
 
 from __future__ import annotations
 
+import warnings
 from pathlib import Path
 from typing import Optional
 
@@ -29,6 +49,11 @@ from ._core import (
 )
 
 
+#: Message of the :class:`ValueError` every backend raises when it is
+#: read after ``close()``.
+_CLOSED_MSG = "operation on a closed file"
+
+
 # ── DAT — native Rust ──────────────────────────────────────────────────────
 
 
@@ -37,27 +62,92 @@ class _DatBackend:
 
     def __init__(self, path: Path):
         self._inner = DatReader(str(path))
+        # Cached at construction so metadata stays answerable after
+        # close() — the file is gone, the numbers describing it are not.
+        self._header = self._inner.header
+        self._num_lines = int(self._inner.num_lines)
+
+    def _require_open(self):
+        inner = getattr(self, "_inner", None)
+        if inner is None:
+            raise ValueError(_CLOSED_MSG)
+        return inner
 
     @property
     def header(self) -> Header:
-        return self._inner.header
+        return self._header
 
     @property
     def num_lines(self) -> int:
-        return int(self._inner.num_lines)
+        return self._num_lines
 
     @property
     def lines_left(self) -> int:
-        return int(self._inner.lines_left)
+        # Cursor state, not metadata: it only means something while the
+        # handle exists, so it raises once the file is closed.
+        return int(self._require_open().lines_left)
 
     def read_lines(self, n: int) -> np.ndarray:
-        return self._inner.read_lines(n)
+        return self._require_open().read_lines(n)
 
     def rewind(self) -> None:
-        self._inner.rewind()
+        self._require_open().rewind()
 
     def seek(self, n: int) -> None:
-        self._inner.seek_lines(int(n))
+        self._require_open().seek_lines(int(n))
+
+    def close(self) -> None:
+        """Close the Rust reader. Idempotent, never raises.
+
+        It does not *swallow* either. Two different things used to land
+        in the same blanket ``except``:
+
+        * ``DatReader`` has no ``close`` — an extension built before the
+          method existed. Dropping our reference is then the whole
+          release path, and it has just happened. Nothing to report.
+        * ``close()`` exists and failed. The one way that happens is a
+          concurrent ``read_lines`` on the same reader: PyO3 holds a
+          mutable borrow of the pyclass for the length of the read (the
+          GIL is released inside it, so another thread really can get
+          here) and raises ``RuntimeError('Already borrowed')``. The
+          reader survives, the descriptor is released when that read
+          finishes — later, not now. Silence there is what makes
+          "``closed`` is True but the file is still open on the NAS"
+          impossible to diagnose, so we warn instead.
+
+        Either way we never raise: callers close in ``finally`` blocks
+        and in ``__del__``.
+        """
+        inner = getattr(self, "_inner", None)
+        # Drop our reference FIRST: the close is then idempotent even if
+        # the native call below were to fail.
+        self._inner = None
+        if inner is None:
+            return
+        close_fn = getattr(inner, "close", None)
+        if close_fn is None:
+            return
+        try:
+            close_fn()
+        except Exception as exc:
+            # `warnings` may already be None during interpreter shutdown.
+            try:
+                warnings.warn(
+                    f"invisensing: the native DatReader.close() failed "
+                    f"({exc!r}); the file descriptor will only be released "
+                    "when the in-flight read finishes. Do not close a File "
+                    "while another thread is reading it.",
+                    ResourceWarning,
+                    stacklevel=2,
+                )
+            except Exception:
+                pass
+
+    def __del__(self):
+        try:
+            self.close()
+        except Exception:
+            pass
 
 
 # ── HDF5 — via h5py ────────────────────────────────────────────────────────
@@ -65,10 +155,11 @@ class _DatBackend:
 # Audace HDF5 files store the samples as a (num_traces,
 # samples_per_trace) dataset named ``acoustic_data``, typed by
 # ``bytes_per_sample`` + the ``FLOAT`` attribute. All header fields are
-# mirrored as scalar attributes. The whole dataset is loaded into RAM
-# at construction — for files that don't fit, the user can stride
-# ``lines_left`` manually since ``h5py`` slices are lazy until
-# accessed.
+# mirrored as scalar attributes. Only the metadata is read at
+# construction; the samples are fetched per ``read_lines`` slice, so a
+# multi-GB capture does not have to fit in RAM. Each slice is a fresh,
+# owning numpy array — h5py materialises it on the spot — so closing
+# the file does not invalidate arrays already handed to the caller.
 
 
 class _Hdf5Backend:
@@ -86,6 +177,8 @@ class _Hdf5Backend:
             ) from exc
         self._file = h5py.File(str(path), "r")
         self._dataset = self._file["acoustic_data"]
+        # Cached so the shape stays answerable once the handle is gone.
+        self._num_lines = int(self._dataset.shape[0])
         self._cursor = 0
 
         attrs = self._file.attrs
@@ -104,25 +197,35 @@ class _Hdf5Backend:
             trigger_delay=int(attrs.get("trigger_delay", 0)),
         )
 
+    def _require_open(self):
+        dataset = getattr(self, "_dataset", None)
+        if dataset is None:
+            raise ValueError(_CLOSED_MSG)
+        return dataset
+
     @property
     def header(self) -> Header:
         return self._header
 
     @property
     def num_lines(self) -> int:
-        return int(self._dataset.shape[0])
+        return self._num_lines
 
     @property
     def lines_left(self) -> int:
-        return max(0, self.num_lines - self._cursor)
+        # Cursor state: meaningless once the handle is gone, so it says
+        # so rather than answering with a frozen number.
+        self._require_open()
+        return max(0, self._num_lines - self._cursor)
 
     def read_lines(self, n: int) -> np.ndarray:
         if n <= 0:
             raise ValueError("n must be a positive integer")
+        dataset = self._require_open()
         if self.lines_left == 0:
             raise OSError("end of file")
         n = min(n, self.lines_left)
-        out = np.asarray(self._dataset[self._cursor : self._cursor + n])
+        out = np.asarray(dataset[self._cursor : self._cursor + n])
         self._cursor += n
         # h5py returns the dataset dtype as-is, which already matches
         # (sample_size, FLOAT) — the Audace HDF5 writer types it that
@@ -131,19 +234,36 @@ class _Hdf5Backend:
         return out
 
     def rewind(self) -> None:
+        self._require_open()
         self._cursor = 0
 
     def seek(self, n: int) -> None:
-        self._cursor = max(0, min(int(n), self.num_lines))
+        self._require_open()
+        self._cursor = max(0, min(int(n), self._num_lines))
 
-    def __del__(self):
-        # h5py.File.close() is idempotent; guard against partial init.
+    def close(self) -> None:
+        """Close the h5py handle. Idempotent, never raises.
+
+        Note this releases the *file descriptor* only: arrays already
+        returned by :meth:`read_lines` are owning copies and stay valid.
+        """
         f = getattr(self, "_file", None)
+        # Drop the references FIRST so a second call is a no-op even if
+        # h5py raises on the way out.
+        self._file = None
+        self._dataset = None
         if f is not None:
             try:
                 f.close()
             except Exception:
                 pass
+
+    def __del__(self):
+        # Last-resort net; `File.close()` is the intended path.
+        try:
+            self.close()
+        except Exception:
+            pass
 
 
 # ── TDMS — via npTDMS ──────────────────────────────────────────────────────
@@ -197,6 +317,12 @@ class _TdmsBackend:
         channels = group.channels()
         return next((c for c in channels if c.name == self.CHANNEL_NAME), channels[0])
 
+    def _require_open(self):
+        channel = getattr(self, "_channel", None)
+        if channel is None:
+            raise ValueError(_CLOSED_MSG)
+        return channel
+
     @property
     def header(self) -> Header:
         return self._header
@@ -207,33 +333,51 @@ class _TdmsBackend:
 
     @property
     def lines_left(self) -> int:
+        self._require_open()
         return max(0, self._num_lines - self._cursor)
 
     def read_lines(self, n: int) -> np.ndarray:
         if n <= 0:
             raise ValueError("n must be a positive integer")
+        channel = self._require_open()
         if self.lines_left == 0:
             raise OSError("end of file")
         n = min(n, self.lines_left)
         offset = self._cursor * self._line_size
         length = n * self._line_size
-        flat = np.asarray(self._channel.read_data(offset, length))
+        # `read_data` returns a freshly allocated array (npTDMS decodes
+        # the segment into it), so the reshape below is a view onto
+        # memory we own — closing the file cannot invalidate it.
+        flat = np.asarray(channel.read_data(offset, length))
         self._cursor += n
         return flat[: n * self._line_size].reshape(n, self._line_size)
 
     def rewind(self) -> None:
+        self._require_open()
         self._cursor = 0
 
     def seek(self, n: int) -> None:
+        self._require_open()
         self._cursor = max(0, min(int(n), self._num_lines))
 
-    def __del__(self):
+    def close(self) -> None:
+        """Close the npTDMS handle. Idempotent, never raises."""
         tdms = getattr(self, "_tdms", None)
+        self._tdms = None
+        # The channel object holds the reader that owns the fd; drop it
+        # too, otherwise the handle survives the close.
+        self._channel = None
         if tdms is not None:
             try:
                 tdms.close()
             except Exception:
                 pass
+
+    def __del__(self):
+        try:
+            self.close()
+        except Exception:
+            pass
 
 
 # ── SEG-Y — via segyio ─────────────────────────────────────────────────────
@@ -316,6 +460,12 @@ class _SegyBackend:
         self._num_lines = int(self._segy.tracecount)
         self._cursor = 0
 
+    def _require_open(self):
+        segy = getattr(self, "_segy", None)
+        if segy is None:
+            raise ValueError(_CLOSED_MSG)
+        return segy
+
     @property
     def header(self) -> Header:
         return self._header
@@ -326,15 +476,20 @@ class _SegyBackend:
 
     @property
     def lines_left(self) -> int:
+        self._require_open()
         return max(0, self._num_lines - self._cursor)
 
     def read_lines(self, n: int) -> np.ndarray:
         if n <= 0:
             raise ValueError("n must be a positive integer")
+        self._require_open()
         if self.lines_left == 0:
             raise OSError("end of file")
         n = min(n, self.lines_left)
         # `trace.raw[start:stop]` -> (n, samples_per_trace) float32.
+        # A *slice* of `trace.raw` allocates its own array (unlike
+        # iterating `trace.raw`, which recycles one buffer). Verified in
+        # tests/test_close.py: the array survives `close()` unchanged.
         block = np.asarray(self._segy.trace.raw[self._cursor : self._cursor + n])
         self._cursor += n
         if not self._header.is_float and self._sample_size in (2, 4, 8):
@@ -342,18 +497,28 @@ class _SegyBackend:
         return np.ascontiguousarray(block)
 
     def rewind(self) -> None:
+        self._require_open()
         self._cursor = 0
 
     def seek(self, n: int) -> None:
+        self._require_open()
         self._cursor = max(0, min(int(n), self._num_lines))
 
-    def __del__(self):
+    def close(self) -> None:
+        """Close the segyio handle. Idempotent, never raises."""
         segy = getattr(self, "_segy", None)
+        self._segy = None
         if segy is not None:
             try:
                 segy.close()
             except Exception:
                 pass
+
+    def __del__(self):
+        try:
+            self.close()
+        except Exception:
+            pass
 
 
 # ── SEG-Y textual-header scanners ──────────────────────────────────────────

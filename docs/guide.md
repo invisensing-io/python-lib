@@ -32,8 +32,73 @@ cleanly even when an exception is raised:
 ```python
 with File("acquisition.dat") as f:
     ...
-# file handle released here
+# file descriptor released here, not whenever `f` is collected
 ```
+
+Outside a `with` block, call `f.close()` yourself. It is idempotent
+(closing twice, or closing after a `with`, is a no-op) and it releases
+the descriptor at the call, not at collection time:
+
+```python
+f = File("acquisition.dat")
+try:
+    header = f.header
+finally:
+    f.close()
+```
+
+A `File` that is neither closed nor used as a context manager emits a
+`ResourceWarning` when it is finally collected. Like the one CPython's
+built-in `open()` emits, it is silent by default and shows up under
+`python -W default`, `python -X dev` and pytest. It matters on a
+long-running process that walks a data tree — a labelling server, a
+dashboard backend: one leaked descriptor per file ends in `EMFILE`, and
+on an NFS/CIFS mount an open handle also blocks the file from being
+deleted or replaced.
+
+#### What a closed file still knows
+
+Closing gives up the **descriptor**, not what was read from it. The
+header is parsed once, at open, and stays on the object, so a closed
+`File` still describes its recording:
+
+```python
+with File("acquisition.dat") as f:
+    data = f.read_all()
+
+# outside the block: the handle is gone, the description is not
+dt   = 1.0 / f.trig_frequency          # fine
+axis = np.arange(f.num_lines) * dt     # fine
+f.mode, f.dtype, f.shape, f.is_interleaved, repr(f)   # all fine
+```
+
+That is deliberate: asking a file you have already closed what its
+sample rate was is a normal thing to do, not a mistake, and raising
+there would break correct scripts for nothing.
+
+What does raise `ValueError` after `close()` is anything that would have
+to touch the file again — `read_lines()`, `read_all()`, `rewind()`,
+`seek_lines()`, iterating the file — plus `lines_left`, which is the
+position of a read cursor on a handle that no longer exists (use
+`num_lines` to describe the file itself). numpy arrays already returned
+by `read_lines()` or the channel extractors own their memory and stay
+valid — closing never invalidates data you already hold, and the channel
+extractors still accept a buffer you read before closing:
+
+```python
+f = File("acquisition.dat")
+buf = f.read_lines(1000)
+f.close()                       # release the handle as early as you can
+i, q = f.get_i(buf), f.get_q(buf)   # arithmetic on your array, no file
+```
+
+One caveat: do not share a `File` across threads. Closing a `.dat`
+while another thread is inside `read_lines()` on the same object cannot
+release the descriptor immediately — the native reader is borrowed for
+the length of that read — so the release is deferred to the end of that
+read. `close()` still returns without raising and emits a
+`ResourceWarning` saying so, rather than reporting a file as closed
+while its handle is still open.
 
 ### Inspecting metadata
 

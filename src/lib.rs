@@ -371,10 +371,18 @@ fn parse_header(bytes: &[u8]) -> PyResult<Header> {
 /// same instance are still serialised by the GIL even on a release-build
 /// extension, but `read_exact` runs without it so a second Python thread
 /// can make progress while the first is blocked on disk I/O.
+///
+/// **Lifetime**: [`DatReader::close`] drops the `BufReader` — and with it
+/// the OS descriptor — at a point the caller chooses, instead of leaving
+/// it to whenever Python reclaims the object. It is idempotent, and any
+/// later read raises `ValueError` rather than reading from a handle that
+/// is no longer there. The parsed header and `num_lines` are kept, so a
+/// closed reader can still describe the file it read.
 #[pyclass(module = "invisensing._core")]
 pub struct DatReader {
     path: PathBuf,
-    reader: BufReader<File>,
+    /// `None` once [`DatReader::close`] has run.
+    reader: Option<BufReader<File>>,
     header: Header,
     /// Total pulses in the file (file_size − HEADER) / (line_size × sample_size).
     num_lines: u64,
@@ -418,11 +426,25 @@ impl DatReader {
 
         Ok(Self {
             path,
-            reader,
+            reader: Some(reader),
             header,
             num_lines,
             lines_left: num_lines,
         })
+    }
+
+    /// Release the OS file descriptor. Idempotent — closing twice is a
+    /// no-op, matching `File.close()` on the Python side. Every later
+    /// read (`read_lines`, `rewind`, `seek_lines`) raises `ValueError`;
+    /// `header`, `num_lines` and `path` keep answering.
+    fn close(&mut self) {
+        self.reader = None;
+    }
+
+    /// `True` once `close()` has run.
+    #[getter]
+    fn is_closed(&self) -> bool {
+        self.reader.is_none()
     }
 
     #[getter]
@@ -449,7 +471,7 @@ impl DatReader {
     /// header). Useful to make multiple passes over the same reader
     /// without re-opening the file.
     fn rewind(&mut self) -> PyResult<()> {
-        self.reader
+        self.reader_mut()?
             .seek(SeekFrom::Start(HEADER_SIZE as u64))
             .map_err(|e| PyIOError::new_err(format!("rewind failed: {e}")))?;
         self.lines_left = self.num_lines;
@@ -465,7 +487,7 @@ impl DatReader {
         let n = n.min(self.num_lines);
         let bytes_per_line = (self.header.line_size as u64) * (self.header.sample_size as u64);
         let offset = HEADER_SIZE as u64 + n.saturating_mul(bytes_per_line);
-        self.reader
+        self.reader_mut()?
             .seek(SeekFrom::Start(offset))
             .map_err(|e| PyIOError::new_err(format!("seek failed: {e}")))?;
         self.lines_left = self.num_lines - n;
@@ -487,6 +509,9 @@ impl DatReader {
     fn read_lines<'py>(&mut self, py: Python<'py>, n: i64) -> PyResult<Bound<'py, PyAny>> {
         if n <= 0 {
             return Err(PyValueError::new_err("n must be a positive integer"));
+        }
+        if self.reader.is_none() {
+            return Err(PyValueError::new_err("read on a closed file"));
         }
         if self.lines_left == 0 {
             return Err(PyIOError::new_err("end of file"));
@@ -516,7 +541,8 @@ impl DatReader {
 
         // Release the GIL while the OS is potentially blocked on disk.
         // `allow_threads` re-acquires it before returning.
-        let read_result = py.allow_threads(|| self.reader.read_exact(&mut bytes));
+        let reader = self.reader_mut()?;
+        let read_result = py.allow_threads(|| reader.read_exact(&mut bytes));
         read_result.map_err(|e| {
             PyIOError::new_err(format!(
                 "short read (wanted {total_bytes} bytes for {n} lines): {e}"
@@ -532,6 +558,17 @@ impl DatReader {
             n as usize,
             line_size,
         )
+    }
+}
+
+impl DatReader {
+    /// The live reader, or the error a caller gets for touching a file
+    /// it has already closed. Kept out of `#[pymethods]` — it returns a
+    /// Rust reference, which is not a Python signature.
+    fn reader_mut(&mut self) -> PyResult<&mut BufReader<File>> {
+        self.reader
+            .as_mut()
+            .ok_or_else(|| PyValueError::new_err("read on a closed file"))
     }
 }
 
