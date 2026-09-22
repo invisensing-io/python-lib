@@ -388,3 +388,62 @@ def test_segy_reads_the_65535_sample_boundary(tmp_path):
         np.testing.assert_array_equal(f.read_all(), data)
     # And the description survives the close, at the boundary too.
     assert f.line_size == samples
+
+
+# ── Metadata parity between the backends ──────────────────────────────────
+#
+# The same capture, saved as DAT and as HDF5, must describe itself the same
+# way. It did not: the Rust HDF5 writer never emitted `trigger_delay` or
+# `content_type`, and this backend never looked for the second one — so a
+# converted file reported no trigger pre-roll and an `undefined` content type,
+# with nothing on either side to say the values had been lost rather than
+# measured. `trigger_delay` in particular places every event in the file.
+
+
+def test_hdf5_reports_the_trigger_preroll_and_the_content_tag(h5py_or_skip):
+    h5py = h5py_or_skip
+    rows, positions = 3, 8
+    payload = np.arange(rows * positions, dtype=np.int16).reshape(rows, positions)
+
+    with tempfile.TemporaryDirectory() as d:
+        path = Path(d) / "tagged.h5"
+        with h5py.File(str(path), "w") as fp:
+            fp.create_dataset("acoustic_data", data=payload)
+            fp.attrs["line_size"] = positions
+            fp.attrs["trig_frequency"] = 2_000
+            fp.attrs["sample_size"] = 2
+            fp.attrs["sample_rate"] = 250_000_000
+            fp.attrs["flags"] = 0
+            fp.attrs["range"] = 1_000
+            fp.attrs["pulse_width"] = 4
+            fp.attrs["num_channels"] = 1
+            fp.attrs["timestamp"] = "2026-01-01_hdf5"
+            fp.attrs["trigger_delay"] = 400
+            fp.attrs["content_type"] = 7  # interleaved_hw_arctan_amplitude
+            fp.attrs["content_type_name"] = "interleaved_hw_arctan_amplitude"
+
+        with File(path) as f:
+            assert f.header.trigger_delay == 400
+            assert f.header.content_type == 7
+            assert f.header.content_type_name == "interleaved_hw_arctan_amplitude"
+
+
+def test_a_file_written_before_the_attributes_existed_still_opens(h5py_or_skip):
+    """No attribute is not a failure — it is an older file, and it says so."""
+    h5py = h5py_or_skip
+    payload = np.zeros((2, 4), dtype=np.int16)
+
+    with tempfile.TemporaryDirectory() as d:
+        path = Path(d) / "legacy.h5"
+        with h5py.File(str(path), "w") as fp:
+            fp.create_dataset("acoustic_data", data=payload)
+            fp.attrs["line_size"] = 4
+            fp.attrs["trig_frequency"] = 1_000
+            fp.attrs["sample_size"] = 2
+            fp.attrs["sample_rate"] = 125_000_000
+            fp.attrs["flags"] = 0
+
+        with File(path) as f:
+            assert f.header.trigger_delay == 0
+            assert f.header.content_type == 0
+            assert f.header.content_type_name == "undefined"

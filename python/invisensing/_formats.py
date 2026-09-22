@@ -195,6 +195,12 @@ class _Hdf5Backend:
             # Absent on files written before the attribute existed; 0 is also
             # the right answer for a capture taken with no pre-roll.
             trigger_delay=int(attrs.get("trigger_delay", 0)),
+            # Same story: the Rust writer emits it as of the pre-roll fix, and
+            # 0 (Undefined) is what a pre-fix file honestly is. Without this,
+            # the same capture reported a content type through the DAT backend
+            # and `undefined` through the HDF5 one, for no reason a caller
+            # could see.
+            content_type=int(attrs.get("content_type", 0)),
         )
 
     def _require_open(self):
@@ -304,6 +310,7 @@ class _TdmsBackend:
             num_channels=int(props.get("num_channels", 1)),
             timestamp=str(props.get("timestamp", "")),
             trigger_delay=int(props.get("trigger_delay", 0)),
+            content_type=int(props.get("content_type", 0)),
         )
         self._line_size = line_size
         self._channel = self._find_channel()
