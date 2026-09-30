@@ -32,3 +32,6 @@ numpy = "0.25"
 lto = "thin"
 codegen-units = 1
 opt-level = 3
+# Ship without a symbol table: function names would map the code for anyone
+# who can read the binary (release builds already carry no debug info).
+strip = "symbols"
