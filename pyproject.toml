@@ -55,6 +55,9 @@ classifiers = [
 dependencies = [
     "numpy>=1.20",
     "h5py>=3.0",
+    # Registers the HDF5 zstd filter (32015) with h5py: recordings written
+    # with the FileWriter's `compression = ZSTD` do not open without it.
+    "hdf5plugin>=4.0",
     "npTDMS>=1.6",
     "segyio>=1.9",
 ]
@@ -70,10 +73,10 @@ Changelog = "https://github.com/invisensing-io/python-lib/releases"
 # Aliases retained for backwards compatibility with older installation
 # instructions. They are no-ops now — the format backends are part of the
 # default install — but `pip install invisensing[hdf5]` still resolves cleanly.
-hdf5 = ["h5py>=3.0"]
+hdf5 = ["h5py>=3.0", "hdf5plugin>=4.0"]
 tdms = ["npTDMS>=1.6"]
 segy = ["segyio>=1.9"]
-all  = ["h5py>=3.0", "npTDMS>=1.6", "segyio>=1.9"]
+all  = ["h5py>=3.0", "hdf5plugin>=4.0", "npTDMS>=1.6", "segyio>=1.9"]
 dev  = ["pytest>=8.0", "maturin>=1.5"]
 docs = [
     "mkdocs>=1.6",

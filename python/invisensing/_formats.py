@@ -162,6 +162,18 @@ class _DatBackend:
 # the file does not invalidate arrays already handed to the caller.
 
 
+_ZSTD_FILTER_ID = "32015"
+
+
+def _filter_ids(dataset) -> set:
+    """Filter names / ids of an h5py dataset's pipeline, as strings (a filter
+    h5py has no name for, such as zstd, appears as its numeric id)."""
+    try:
+        return {str(k) for k in dataset._filters}
+    except Exception:
+        return set()
+
+
 class _Hdf5Backend:
     def __init__(self, path: Path):
         try:
@@ -175,8 +187,24 @@ class _Hdf5Backend:
                 "`pip install invisensing`. If you installed with --no-deps, "
                 "run `pip install h5py` (or `pip install invisensing[hdf5]`)."
             ) from exc
+        # Recordings written with the FileWriter's `compression = ZSTD` store
+        # `acoustic_data` through the registered HDF5 zstd filter (32015),
+        # which `hdf5plugin` registers with h5py when imported. It is a
+        # dependency of this package; if it is missing anyway, such a file
+        # must say what to install instead of failing deep inside libhdf5.
+        try:
+            import hdf5plugin  # type: ignore  # noqa: F401
+        except ImportError:
+            hdf5plugin = None
         self._file = h5py.File(str(path), "r")
         self._dataset = self._file["acoustic_data"]
+        if hdf5plugin is None and _ZSTD_FILTER_ID in _filter_ids(self._dataset):
+            self._file.close()
+            raise ImportError(
+                f"{path} is compressed with zstd (HDF5 filter 32015, Audace "
+                "FileWriter compression = ZSTD) and `hdf5plugin` is not "
+                "installed: run `pip install hdf5plugin`."
+            )
         # Cached so the shape stays answerable once the handle is gone.
         self._num_lines = int(self._dataset.shape[0])
         self._cursor = 0

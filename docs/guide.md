@@ -303,8 +303,14 @@ path.
 Audace HDF5 files store the samples as a `(num_traces,
 samples_per_trace)` dataset named `acoustic_data`, typed by
 `bytes_per_sample` and the `FLOAT` attribute. Every header field is
-mirrored as a scalar attribute. The whole dataset loads into RAM at
-open time.
+mirrored as a scalar attribute. Lines are read slice by slice: a
+multi-GB capture never has to fit in RAM.
+
+Recordings written with the FileWriter's `compression = ZSTD` store the
+dataset in chunks through the standard pipeline byte shuffle + zstd
+(HDF5 filter 32015). `invisensing` imports `hdf5plugin`, a dependency,
+so they open like any other file; outside it, run `import hdf5plugin`
+before opening one with `h5py`, or the file does not open.
 
 ### TDMS — via `npTDMS`
 

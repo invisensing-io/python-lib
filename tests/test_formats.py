@@ -99,6 +99,57 @@ def test_hdf5_phase_returns_float32(h5py_or_skip):
             np.testing.assert_allclose(got, payload, rtol=1e-6)
 
 
+def _zstd_phase_file(h5py, hdf5plugin, path: Path, payload: np.ndarray) -> None:
+    """A phase recording stored like the FileWriter's `compression = ZSTD`:
+    chunks of whole traces, byte shuffle, then the zstd filter (32015)."""
+    rows, positions = payload.shape
+    with h5py.File(str(path), "w") as fp:
+        fp.create_dataset(
+            "acoustic_data",
+            data=payload,
+            chunks=(min(rows, 4), positions),
+            shuffle=True,
+            **hdf5plugin.Zstd(clevel=1),
+        )
+        fp.attrs["line_size"] = positions
+        fp.attrs["trig_frequency"] = 2_000
+        fp.attrs["sample_size"] = 4
+        fp.attrs["sample_rate"] = 125_000_000
+        fp.attrs["flags"] = FLAG_DEMODULATED | FLAG_FLOAT | FLAG_PHASE
+        fp.attrs["range"] = 0
+        fp.attrs["pulse_width"] = 0
+        fp.attrs["num_channels"] = 1
+        fp.attrs["timestamp"] = "2026-10-12_hdf5_zstd"
+
+
+def test_hdf5_zstd_compressed_phase_reads_back_bit_for_bit(h5py_or_skip):
+    h5py = h5py_or_skip
+    hdf5plugin = pytest.importorskip("hdf5plugin")
+    rng = np.random.default_rng(7)
+    payload = rng.normal(0.0, 1.5, size=(11, 97)).astype(np.float32)
+    with tempfile.TemporaryDirectory() as d:
+        path = Path(d) / "zstd.hdf5"
+        _zstd_phase_file(h5py, hdf5plugin, path, payload)
+        with File(path) as f:
+            assert f.mode is Mode.PHASE
+            assert f.num_lines == 11
+            got = f.get_phase(n=11)
+            np.testing.assert_array_equal(got.view(np.int32), payload.view(np.int32))
+
+
+def test_a_zstd_file_without_hdf5plugin_says_what_to_install(h5py_or_skip, monkeypatch):
+    h5py = h5py_or_skip
+    hdf5plugin = pytest.importorskip("hdf5plugin")
+    payload = np.zeros((3, 8), dtype=np.float32)
+    with tempfile.TemporaryDirectory() as d:
+        path = Path(d) / "zstd.hdf5"
+        _zstd_phase_file(h5py, hdf5plugin, path, payload)
+        # `import hdf5plugin` now fails, as on an install without it.
+        monkeypatch.setitem(__import__("sys").modules, "hdf5plugin", None)
+        with pytest.raises(ImportError, match="pip install hdf5plugin"):
+            File(path)
+
+
 # ── TDMS ──────────────────────────────────────────────────────────────────
 
 

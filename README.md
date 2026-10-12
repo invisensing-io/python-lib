@@ -28,8 +28,9 @@ pip install invisensing
 
 That's it — every supported file format (DAT, HDF5, TDMS, SEG-Y) works
 out of the box. The default install pulls in `numpy`, `h5py`,
-`npTDMS`, and `segyio` so any file written by the Audace FileWriter
-can be opened without further setup.
+`hdf5plugin`, `npTDMS`, and `segyio` so any file written by the Audace
+FileWriter — HDF5 compressed with zstd included — can be opened
+without further setup.
 
 Wheels are built from a Rust extension; `pip` handles the native build
 transparently. No Rust toolchain is required for end users.
