@@ -162,6 +162,37 @@ more than 1 Hz) away from `trig_frequency` cannot describe the file and
 is ignored (`trig_clock_hz` is then `None`; the stored values stay in
 `f.header.trig_clock_hz` / `f.header.trig_period_ticks`).
 
+### Corrected line times (since 1.4.0)
+
+The card's oscillator is a few ppm off the host clock (and far more when
+its external 10 MHz reference is missing), and shots the card loses shift
+every later line: counting lines from the start drifts by tens of ms an
+hour. The Audace acquisition measures that drift and publishes a **time
+map** that every module of the chain evaluates the same way; the recorder
+writes the part of it covering each HDF5 file into its attributes. The SDK
+reads it:
+
+| Property / method | Meaning |
+|---|---|
+| `line_time_ns(i)` | on a file with `time_correction == "cardclock-v1"`: the **corrected** time of line `i` on the file's axis (`time_map_line` / `time_map_ns` / `time_map_period_fs`: from node `k` on, `ns[k] + ⌊(i − line[k]) · period_fs[k] / 10⁶⌋`), the very integer the acquisition gave it; else the count, as in 1.3.0 |
+| `line_time_ns(i, nominal=True)` | the count, as 1.3.0 computed it (from `timestamp_nominal_ns` when the file carries it) |
+| `times_ns(start=0, count=None)` | the same times as an `int64` numpy vector (native core, exact) |
+| `time_correction` | `"cardclock-v1"`, `"none"` (timed by the count), or `None` (the file does not say: older files) |
+| `time_correction_state` | the least favourable state over the file (`"tracking"`, `"prior"`, `"slewing"`, `"suspect"`, `"provisional"`…) |
+| `time_uncertainty_ns` | estimated uncertainty (1 σ) of the corrected **time** |
+| `trig_frequency_measured_hz` | the card's cadence measured against the host clock |
+| `duration` | on a corrected file, measured on its corrected times (first to last line) |
+
+`timestamp_ns` (and `header.acquisition_ns`) of a corrected HDF5 is the
+corrected time of its first line; `timestamp_nominal_ns` is the count. A
+DAT, SEG-Y or TDMS keeps its format: its start time is the corrected one
+when `f.header.time_corrected` is `True` (bit `TIME_FLAG_CORRECTED` of
+header bytes 100..104), and lines count from there.
+
+Keep `trig_frequency_real_hz` as the sampling rate along time (spectra,
+filters, Nyquist): the correction moves the time *labels*, not the samples.
+Every file written before the time map is timed exactly as 1.3.0 timed it.
+
 ---
 
 ## Acquisition modes (`Mode` enum)

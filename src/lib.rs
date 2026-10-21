@@ -9,6 +9,9 @@
 //! - [`parse_header`]: standalone helper for the 128-byte header, reused
 //!   by the HDF5 / TDMS / SEG-Y wrappers (which round-trip the same
 //!   fields as file attributes).
+//! - [`time_axis_ns`]: the time of a run of lines on a file's time axis
+//!   (the card's time map, HDF5 `time_map_*` attributes) — exact integers,
+//!   the ones the acquisition stamped.
 //! - De-interleave kernels [`split_pair_i16_primary`],
 //!   [`split_pair_i16_secondary`], [`split_pair_unsigned`],
 //!   [`split_pair_to_complex_i16`], [`split_pair_f32_primary`],
@@ -33,7 +36,7 @@
 //! this crate ships its own copy of the layout so it stays standalone.
 
 use numpy::{
-    PyArray2,
+    PyArray1, PyArray2,
     ndarray::{Array2, ArrayView2},
 };
 use pyo3::{
@@ -80,6 +83,22 @@ mod offsets {
     pub const TRIG_CLOCK_HZ: usize = 88;
     /// u32 LE, the trigger period in ticks of [`TRIG_CLOCK_HZ`].
     pub const TRIG_PERIOD_TICKS: usize = 92;
+    /// i32 LE: line `m` of a wire stream is line `m + line_offset` of the
+    /// card's time map (`−D` at the output of Demodulation, 0 elsewhere and
+    /// in every file). Zero on captures written before the field existed.
+    pub const LINE_OFFSET: usize = 96;
+    /// u32 LE bit set, see [`time_flag_bits`]. Zero on older captures.
+    pub const TIME_FLAGS: usize = 100;
+}
+
+/// Bits of the header's `time_flags` (bytes 100..104) — must match the
+/// Audace wire-format `header::time_flags`.
+pub mod time_flag_bits {
+    /// The acquisition published a time map for this run (wire streams).
+    pub const TIME_MAP_V1: u32 = 1 << 0;
+    /// Files: the header's start time is the CORRECTED time of the file's
+    /// first line (the card's time map), not the count `anchor + lines`.
+    pub const TIME_CORRECTED: u32 = 1 << 1;
 }
 
 const NS_PER_S: u128 = 1_000_000_000;
@@ -202,6 +221,14 @@ pub struct Header {
     /// HDF5 attribute `trig_period_ticks`). Raw value as stored: `0` when
     /// unknown.
     pub trig_period_ticks: u32,
+    /// DataHeader bytes 96..100: line `m` of a wire stream is line
+    /// `m + line_offset` of the card's time map. `0` in files and on every
+    /// older capture.
+    pub line_offset: i32,
+    /// DataHeader bytes 100..104, bits `TIME_FLAG_MAP_V1` /
+    /// `TIME_FLAG_CORRECTED`. For an HDF5, `TIME_FLAG_CORRECTED` when its
+    /// `time_correction` attribute is `"cardclock-v1"`. `0` on older files.
+    pub time_flags: u32,
 }
 
 impl Header {
@@ -244,6 +271,8 @@ impl Header {
         trigger_delay = 0,
         trig_clock_hz = 0,
         trig_period_ticks = 0,
+        line_offset = 0,
+        time_flags = 0,
     ))]
     #[allow(clippy::too_many_arguments)]
     fn new(
@@ -261,6 +290,8 @@ impl Header {
         trigger_delay: u32,
         trig_clock_hz: u32,
         trig_period_ticks: u32,
+        line_offset: i32,
+        time_flags: u32,
     ) -> Self {
         Self {
             timestamp,
@@ -277,7 +308,26 @@ impl Header {
             trigger_delay,
             trig_clock_hz,
             trig_period_ticks,
+            line_offset,
+            time_flags,
         }
+    }
+
+    /// `True` when the header's start time is the corrected time of the
+    /// file's first line (`time_flags & TIME_FLAG_CORRECTED`): a DAT, SEG-Y
+    /// or TDMS stamped from the card's time map, or an HDF5 whose
+    /// `time_correction` is `"cardclock-v1"`.
+    #[getter]
+    fn time_corrected(&self) -> bool {
+        self.time_flags & time_flag_bits::TIME_CORRECTED != 0
+    }
+
+    /// The cadence lines are timed with, `(clock, ticks)`: the card's
+    /// rational when known and consistent, else `(trig_frequency, 1)`;
+    /// `None` without any cadence.
+    #[getter]
+    fn line_timing(&self) -> Option<(u32, u32)> {
+        self.line_rational()
     }
 
     /// The card's trigger rational `(trig_clock_hz, trig_period_ticks)`, or
@@ -410,9 +460,10 @@ impl Header {
     }
 
     fn __repr__(&self) -> String {
-        // The trigger rational only when the header carries one, so the
-        // representation of every older header is unchanged.
-        let timing = if self.trig_clock_hz != 0 || self.trig_period_ticks != 0 {
+        // The trigger rational and the time-map fields only when the header
+        // carries them, so the representation of every older header is
+        // unchanged.
+        let mut timing = if self.trig_clock_hz != 0 || self.trig_period_ticks != 0 {
             format!(
                 ", trig_clock_hz={}, trig_period_ticks={}",
                 self.trig_clock_hz, self.trig_period_ticks
@@ -420,6 +471,12 @@ impl Header {
         } else {
             String::new()
         };
+        if self.line_offset != 0 || self.time_flags != 0 {
+            timing.push_str(&format!(
+                ", line_offset={}, time_flags=0x{:X}",
+                self.line_offset, self.time_flags
+            ));
+        }
         format!(
             "Header(line_size={}, sample_size={}, sample_rate={}, trig_frequency={}{}, \
              flags=0x{:X}, positions_per_line={}, interleaved={}, float={}, unsigned={})",
@@ -493,6 +550,8 @@ fn parse_header(bytes: &[u8]) -> PyResult<Header> {
         trigger_delay: read_u32_le(bytes, offsets::TRIGGER_DELAY),
         trig_clock_hz: read_u32_le(bytes, offsets::TRIG_CLOCK_HZ),
         trig_period_ticks: read_u32_le(bytes, offsets::TRIG_PERIOD_TICKS),
+        line_offset: read_i32_le(bytes, offsets::LINE_OFFSET),
+        time_flags: read_u32_le(bytes, offsets::TIME_FLAGS),
     })
 }
 
@@ -1085,8 +1144,77 @@ fn build_header_bytes<'py>(py: Python<'py>, header: &Header) -> PyResult<Bound<'
         .copy_from_slice(&header.trig_clock_hz.to_le_bytes());
     buf[offsets::TRIG_PERIOD_TICKS..offsets::TRIG_PERIOD_TICKS + 4]
         .copy_from_slice(&header.trig_period_ticks.to_le_bytes());
+    // Time-map fields (bytes 96..104), written as stored: zero on every
+    // header that does not carry them.
+    buf[offsets::LINE_OFFSET..offsets::LINE_OFFSET + 4]
+        .copy_from_slice(&header.line_offset.to_le_bytes());
+    buf[offsets::TIME_FLAGS..offsets::TIME_FLAGS + 4]
+        .copy_from_slice(&header.time_flags.to_le_bytes());
 
     Ok(PyBytes::new(py, &buf))
+}
+
+// ── Time axis (the card's time map, in a file) ──────────────────────────────
+
+const FS_PER_NS: i128 = 1_000_000;
+
+/// Time of file line `line` on a time axis: from node `k` on (the last node
+/// whose line is `<= line`, the first one for a line before every node),
+/// `ns[k] + ⌊(line − lines[k]) · period_fs[k] / 10⁶⌋`, or, for a node of
+/// period 0, `ns[k] + ⌊(line − lines[k]) · ticks · 10⁹ / clock⌋` on the
+/// file's cadence (0 without one). Floor for a negative offset too;
+/// saturated to the `i64` range. The very integers of the acquisition's
+/// `audace::time_map::axis_time_of` (shared fixtures).
+fn axis_eval(lines: &[i64], ns: &[i64], period_fs: &[u64], timing: Option<(u32, u32)>, line: i64) -> i64 {
+    let k = lines.partition_point(|&l| l <= line).saturating_sub(1);
+    let d = line as i128 - lines[k] as i128;
+    let dt = if period_fs[k] == 0 {
+        match timing {
+            Some((clock, ticks)) if clock > 0 => {
+                (d * ticks as i128 * NS_PER_S as i128).div_euclid(clock as i128)
+            }
+            _ => 0,
+        }
+    } else {
+        (d * period_fs[k] as i128).div_euclid(FS_PER_NS)
+    };
+    (ns[k] as i128 + dt).clamp(i64::MIN as i128, i64::MAX as i128) as i64
+}
+
+/// The times of `count` consecutive file lines from `first` on, ns, as an
+/// `int64` numpy vector, on the time axis `(lines, ns, period_fs)` (see
+/// [`axis_eval`]) with the file's cadence `timing = (clock, ticks)` for
+/// nodes of period 0. Exact integer arithmetic (i128): a time above 2⁵³
+/// keeps every nanosecond. Metadata only — no sample is read.
+#[pyfunction]
+#[pyo3(signature = (lines, ns, period_fs, timing, first, count))]
+fn time_axis_ns<'py>(
+    py: Python<'py>,
+    lines: Vec<i64>,
+    ns: Vec<i64>,
+    period_fs: Vec<u64>,
+    timing: Option<(u32, u32)>,
+    first: i64,
+    count: usize,
+) -> PyResult<Bound<'py, PyArray1<i64>>> {
+    if lines.is_empty() || lines.len() != ns.len() || ns.len() != period_fs.len() {
+        return Err(PyValueError::new_err(format!(
+            "a time axis needs as many lines, times and periods, at least one \
+             (got {}, {}, {})",
+            lines.len(),
+            ns.len(),
+            period_fs.len()
+        )));
+    }
+    if lines.windows(2).any(|w| w[0] >= w[1]) {
+        return Err(PyValueError::new_err("time axis lines must be strictly increasing"));
+    }
+    let out: Vec<i64> = py.allow_threads(|| {
+        (0..count as i64)
+            .map(|j| axis_eval(&lines, &ns, &period_fs, timing, first.saturating_add(j)))
+            .collect()
+    });
+    Ok(PyArray1::from_vec(py, out))
 }
 
 // ── Module init ─────────────────────────────────────────────────────────────
@@ -1098,6 +1226,7 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<DatReader>()?;
     m.add_function(wrap_pyfunction!(parse_header, m)?)?;
     m.add_function(wrap_pyfunction!(build_header_bytes, m)?)?;
+    m.add_function(wrap_pyfunction!(time_axis_ns, m)?)?;
     m.add_function(wrap_pyfunction!(split_pair_i16_primary, m)?)?;
     m.add_function(wrap_pyfunction!(split_pair_i16_secondary, m)?)?;
     m.add_function(wrap_pyfunction!(split_pair_unsigned, m)?)?;
@@ -1120,6 +1249,8 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("FLAG_INTERLEAVED", flag_bits::INTERLEAVED)?;
     m.add("FLAG_UNSIGNED", flag_bits::UNSIGNED)?;
     m.add("HEADER_SIZE", HEADER_SIZE)?;
+    m.add("TIME_FLAG_MAP_V1", time_flag_bits::TIME_MAP_V1)?;
+    m.add("TIME_FLAG_CORRECTED", time_flag_bits::TIME_CORRECTED)?;
 
     Ok(())
 }

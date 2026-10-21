@@ -296,6 +296,26 @@ exactly what 1.2.x computed. Where the rational is stored: HDF5 attributes
 92..96 (u32 LE, `0` = unknown). A rational more than 1 % (and more than
 1 Hz) away from `trig_frequency` does not describe the file and is ignored.
 
+### Corrected line times (since 1.4.0)
+
+The Audace acquisition corrects the drift of the card's oscillator and the
+shots it lost (its *time map*); the recorder writes the axis of each HDF5
+file into its attributes, and `line_time_ns(i)` follows it:
+
+```python
+with File("acquisition.h5") as f:
+    f.time_correction           # "cardclock-v1" | "none" | None (older file)
+    f.line_time_ns(1000)        # corrected time of line 1000, exact int ns
+    f.line_time_ns(1000, nominal=True)  # the count, as 1.3.0 gave it
+    t = f.times_ns()            # every line, int64 numpy vector
+    f.trig_frequency_measured_hz, f.time_uncertainty_ns
+```
+
+On a corrected file `timestamp_ns` is the corrected start and
+`timestamp_nominal_ns` the count. Spectra and filters keep
+`trig_frequency_real_hz` as their sampling rate. Files without the
+attributes are timed exactly as before.
+
 ## Writing files
 
 ```python

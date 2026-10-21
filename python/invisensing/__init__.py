@@ -66,6 +66,8 @@ from ._reader import (
     FLAG_INTERLEAVED,
     FLAG_UNSIGNED,
     HEADER_SIZE,
+    TIME_FLAG_MAP_V1,
+    TIME_FLAG_CORRECTED,
 )
 from . import _legacy as _legacy_impl
 
@@ -92,6 +94,8 @@ __all__ = [
     "FLAG_INTERLEAVED",
     "FLAG_UNSIGNED",
     "HEADER_SIZE",
+    "TIME_FLAG_MAP_V1",
+    "TIME_FLAG_CORRECTED",
     "__version__",
 ]
 

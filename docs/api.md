@@ -95,3 +95,12 @@ inspect or build a `Header` by hand.
 | `FLAG_INTERLEAVED` | `0x100` | Wire carries 2 samples per spatial position |
 | `FLAG_UNSIGNED` | `0x200` | Odd lane of an INTERLEAVED pair is `u16` |
 | `HEADER_SIZE` | `128` | Size of the wire header in bytes |
+
+## Time-flag constants
+
+Bits of the header's `time_flags` (bytes 100..104, `Header.time_flags`).
+
+| Constant | Value | Meaning |
+|---|---|---|
+| `TIME_FLAG_MAP_V1` | `1` | Wire streams: the acquisition published a time map for the run |
+| `TIME_FLAG_CORRECTED` | `2` | Files: the header's start time is the corrected time of the first line (`Header.time_corrected`) |

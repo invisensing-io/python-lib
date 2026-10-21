@@ -50,6 +50,8 @@ from ._core import (
     FLAG_INTERLEAVED,
     FLAG_UNSIGNED,
     HEADER_SIZE,
+    TIME_FLAG_MAP_V1,
+    TIME_FLAG_CORRECTED,
 )
 
 __all__ = [
@@ -70,8 +72,14 @@ __all__ = [
     "FLAG_INTERLEAVED",
     "FLAG_UNSIGNED",
     "HEADER_SIZE",
+    "TIME_FLAG_MAP_V1",
+    "TIME_FLAG_CORRECTED",
 ]
 
+
+_I64_MIN = -(2**63)
+_I64_MAX = 2**63 - 1
+_FS_PER_NS = 1_000_000
 
 # Speed-of-light in single-mode silica fibre at 1550 nm (n ≈ 1.45).
 # Same value the Audace producer (Cardcontrol) uses for its own
@@ -229,6 +237,9 @@ class File:
     # (set at open). A class-level default so that `__repr__` never trips on
     # an instance whose construction stopped half way.
     _real_hz_attr: Optional[float] = None
+    # The file's time attributes (HDF5 written from the card's time map),
+    # set at open; ``None`` for every other file.
+    _time_axis = None
 
     # Suffix → backend class name (looked up in ``_formats``). Adding a
     # new format means adding an entry here and a class in ``_formats``.
@@ -278,6 +289,8 @@ class File:
             getattr(self._backend, "trig_frequency_real_hz_attr", None),
             self._header.trig_frequency,
         )
+        # The card's time map as the recorder wrote it (HDF5 only).
+        self._time_axis = getattr(self._backend, "time_axis", None)
 
     # ── Lifecycle ──────────────────────────────────────────────────────
 
@@ -500,26 +513,125 @@ class File:
             return self._real_hz_attr == float(self._header.trig_frequency)
         return True
 
-    def line_time_ns(self, i: int) -> int:
+    def line_time_ns(self, i: int, *, nominal: bool = False) -> int:
         """Acquisition time of line (trigger pulse) ``i``, 0-based, in
         nanoseconds since the Unix epoch.
 
-        ``header.acquisition_ns + ⌊i · trig_period_ticks · 10⁹ /
-        trig_clock_hz⌋`` when the file carries the card's rational, else
-        ``header.acquisition_ns + ⌊i · 10⁹ / trig_frequency⌋``. Exact
-        integer arithmetic: the very integer the acquisition stamped, and
-        at an exact frequency the same integer either way. When the file has
-        no anchor (``header.acquisition_ns == 0``: legacy ASCII timestamp)
-        the result is the offset from the first line.
+        * A file stamped from the card's **time map** (HDF5 with
+          ``time_correction = "cardclock-v1"``, see
+          :attr:`time_correction`): the time on the file's axis — from the
+          last node ``k`` at or before ``i``, ``time_map_ns[k] + ⌊(i −
+          time_map_line[k]) · time_map_period_fs[k] / 10⁶⌋`` (a period 0
+          counts on the card's rational). The **corrected** time: the card's
+          oscillator drift and its lost shots taken out, exactly the
+          nanosecond the acquisition's live modules gave this line.
+        * Any other file: ``header.acquisition_ns + ⌊i · trig_period_ticks ·
+          10⁹ / trig_clock_hz⌋`` when it carries the card's rational, else
+          ``header.acquisition_ns + ⌊i · 10⁹ / trig_frequency⌋`` — the
+          integer 1.3.0 gave. A DAT, SEG-Y or TDMS whose header says
+          :attr:`Header.time_corrected` starts at the corrected time of its
+          first line and counts from there.
 
-        ``i`` may exceed :attr:`num_lines` (the cadence extrapolates).
-        Raises :class:`ValueError` for a negative ``i`` and
-        :class:`TypeError` for a non-integer.
+        ``nominal=True`` gives the count instead, as 1.3.0 computed it: from
+        the file's ``timestamp_nominal_ns`` when it carries one, else from
+        its start time.
+
+        Exact integer arithmetic. When the file has no anchor
+        (``header.acquisition_ns == 0``: legacy ASCII timestamp) the result
+        is the offset from the first line. ``i`` may exceed
+        :attr:`num_lines` (the last segment extrapolates). Raises
+        :class:`ValueError` for a negative ``i`` and :class:`TypeError` for
+        a non-integer.
         """
         i = operator.index(i)
         if i < 0:
             raise ValueError(f"line index must be >= 0 (got {i})")
+        axis = self._time_axis
+        if nominal:
+            if axis is not None and axis.nominal_start_ns is not None:
+                return _clamp_i64(axis.nominal_start_ns + self._header.lines_to_ns(i))
+            return self._header.line_time_ns(i)
+        if axis is not None and axis.corrected:
+            return _axis_time_ns(axis.lines, axis.ns, axis.period_fs, self._header.line_timing, i)
         return self._header.line_time_ns(i)
+
+    def times_ns(
+        self, start: int = 0, count: Optional[int] = None, *, nominal: bool = False
+    ) -> np.ndarray:
+        """The times of lines ``start .. start + count`` (default: to the
+        end of the file), ns since the Unix epoch, as an ``int64`` numpy
+        vector — :meth:`line_time_ns` of each line, the same integers,
+        computed in the native core. Metadata only: no sample is read, and
+        it works on a closed file.
+        """
+        start = operator.index(start)
+        if start < 0:
+            raise ValueError(f"start must be >= 0 (got {start})")
+        if count is None:
+            count = max(0, self._num_lines - start)
+        count = operator.index(count)
+        if count < 0:
+            raise ValueError(f"count must be >= 0 (got {count})")
+        timing = self._header.line_timing
+        axis = self._time_axis
+        if not nominal and axis is not None and axis.corrected:
+            return _core.time_axis_ns(axis.lines, axis.ns, axis.period_fs, timing, start, count)
+        if nominal and axis is not None and axis.nominal_start_ns is not None:
+            anchor = axis.nominal_start_ns
+        else:
+            anchor = self._header.acquisition_ns
+        # One node of period 0 at line 0: `anchor + ⌊i · ticks · 10⁹ / clock⌋`,
+        # exactly `Header.line_time_ns`.
+        return _core.time_axis_ns([0], [anchor], [0], timing, start, count)
+
+    @property
+    def time_correction(self) -> Optional[str]:
+        """How the file's times were stamped, or ``None`` when it does not
+        say (files written before the card's time map, DAT/SEG-Y/TDMS
+        without the flag).
+
+        * ``"cardclock-v1"``: from the card's time map — ``timestamp_ns``
+          and :meth:`line_time_ns` are the **corrected** times (the card's
+          oscillator drift and lost shots taken out); the count is
+          ``line_time_ns(i, nominal=True)``. A DAT/SEG-Y/TDMS says so with
+          :attr:`Header.time_corrected` (its start time only).
+        * ``"none"``: timed by the count (no time map for that run).
+        """
+        axis = self._time_axis
+        if axis is not None:
+            return axis.correction
+        if self._header.time_corrected:
+            return "cardclock-v1"
+        return None
+
+    @property
+    def time_correction_state(self) -> Optional[str]:
+        """The least favourable state of the correction over the file
+        (``"tracking"``, ``"prior"``, ``"slewing"``, ``"suspect"``,
+        ``"provisional"``…), or ``None`` when the file does not say."""
+        axis = self._time_axis
+        return None if axis is None else axis.state
+
+    @property
+    def time_uncertainty_ns(self) -> Optional[int]:
+        """Largest estimated uncertainty (1 σ) of the corrected time over
+        the file, ns — the precision of the TIME, not of the cadence —
+        or ``None``."""
+        axis = self._time_axis
+        return None if axis is None else axis.uncertainty_ns
+
+    @property
+    def trig_frequency_measured_hz(self) -> Optional[float]:
+        """The card's cadence as the acquisition measured it against the
+        host clock (true seconds), Hz, or ``None`` when the file does not
+        carry it.
+
+        Not the rate to compute a spectrum with: :attr:`trig_frequency_real_hz`
+        (the programmed cadence) stays the sampling rate of the data along
+        time; this one says how far the card's oscillator was off it.
+        """
+        axis = self._time_axis
+        return None if axis is None else axis.measured_hz
 
     @property
     def num_lines(self) -> int:
@@ -594,8 +706,18 @@ class File:
         ``num_lines / trig_frequency_real_hz``.
 
         On a recording without a real rate (older files, external trigger)
-        this is ``num_lines / trig_frequency``, exactly as before.
+        this is ``num_lines / trig_frequency``, exactly as before. A file
+        stamped from the card's time map (:attr:`time_correction` =
+        ``"cardclock-v1"``) is measured on its corrected times instead:
+        ``num_lines`` mean line periods, the first line to the last
+        (``timestamp_last_ns − timestamp_ns``) spread over ``num_lines − 1``
+        periods — lost shots inside the file included.
         """
+        axis = self._time_axis
+        n = self.num_lines
+        if axis is not None and axis.corrected and axis.last_ns is not None and n > 1:
+            first = self.line_time_ns(0)
+            return (axis.last_ns - first) / 1e9 * n / (n - 1)
         if self._header.trig_timing is None and self._real_hz_attr is None:
             return self.num_lines / max(self.trig_frequency, 1)
         return self.num_lines / self.trig_frequency_real_hz
@@ -935,6 +1057,40 @@ def _dtype_for(h: Header) -> np.dtype:
     if h.is_float:
         return np.dtype(f"float{h.sample_size * 8}")
     return np.dtype(f"int{h.sample_size * 8}")
+
+
+def _clamp_i64(v: int) -> int:
+    return max(_I64_MIN, min(_I64_MAX, v))
+
+
+def _axis_time_ns(lines, ns, period_fs, timing, line: int) -> int:
+    """Time of file line ``line`` on a time axis — the formula of the
+    acquisition's ``audace::time_map::axis_time_of``, in Python integers:
+    from the last node ``k`` with ``lines[k] <= line`` (the first node for a
+    line before every node), ``ns[k] + ⌊(line − lines[k]) · period_fs[k] /
+    10⁶⌋``, or ``⌊(line − lines[k]) · ticks · 10⁹ / clock⌋`` for a node of
+    period 0 (``timing = (clock, ticks)``; 0 without one). Floor division,
+    negative offsets included; saturated to the ``int64`` range."""
+    k = 0
+    lo, hi = 0, len(lines)
+    while lo < hi:  # last index with lines[k] <= line
+        mid = (lo + hi) // 2
+        if lines[mid] <= line:
+            lo = mid + 1
+        else:
+            hi = mid
+    k = max(lo - 1, 0)
+    d = line - lines[k]
+    p = period_fs[k]
+    if p == 0:
+        if timing is None or timing[0] <= 0:
+            dt = 0
+        else:
+            clock, ticks = timing
+            dt = (d * ticks * 1_000_000_000) // clock
+    else:
+        dt = (d * p) // _FS_PER_NS
+    return _clamp_i64(ns[k] + dt)
 
 
 def _consistent_rate(rate: Optional[float], trig_frequency: int) -> Optional[float]:

@@ -46,6 +46,7 @@ from ._core import (
     FLAG_INTERLEAVED,
     FLAG_UNSIGNED,
     FLAG_PHASE,
+    TIME_FLAG_CORRECTED,
 )
 
 
@@ -205,6 +206,128 @@ def _positive_float_attr(attrs, name: str) -> Optional[float]:
     return v if np.isfinite(v) and v > 0 else None
 
 
+def _float_attr(attrs, name: str) -> Optional[float]:
+    """A finite numeric scalar attribute (any sign), or ``None``."""
+    value = attrs.get(name)
+    if value is None:
+        return None
+    try:
+        arr = np.asarray(value)
+        if arr.size != 1 or arr.dtype.kind not in "iuf":
+            return None
+        v = float(arr.reshape(()))
+    except (TypeError, ValueError):
+        return None
+    return v if np.isfinite(v) else None
+
+
+def _opt_int_attr(attrs, name: str) -> Optional[int]:
+    """An integer scalar attribute as a Python ``int`` (exact), or ``None``."""
+    value = attrs.get(name)
+    if value is None:
+        return None
+    try:
+        arr = np.asarray(value)
+        if arr.size != 1 or arr.dtype.kind not in "iu":
+            return None
+        return int(arr.reshape(()))
+    except (TypeError, ValueError):
+        return None
+
+
+def _str_attr(attrs, name: str) -> Optional[str]:
+    """A string attribute (h5py hands variable-length UTF-8 back as ``str``
+    or ``bytes`` depending on its version), or ``None``."""
+    value = attrs.get(name)
+    if value is None:
+        return None
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    if isinstance(value, np.ndarray) and value.size == 1:
+        value = value.reshape(()).item()
+        if isinstance(value, bytes):
+            return value.decode("utf-8", errors="replace")
+    return value if isinstance(value, str) else None
+
+
+def _int_list_attr(attrs, name: str) -> Optional[list]:
+    """A 1-D integer array attribute as a list of exact Python ints."""
+    value = attrs.get(name)
+    if value is None:
+        return None
+    try:
+        arr = np.asarray(value)
+    except (TypeError, ValueError):
+        return None
+    if arr.dtype.kind not in "iu":
+        return None
+    return [int(v) for v in arr.reshape(-1).tolist()]
+
+
+#: ``time_correction`` of a file timed by the card's time map.
+CORRECTION_CARDCLOCK_V1 = "cardclock-v1"
+#: ``time_correction`` of a file timed by the count (no time map).
+CORRECTION_NONE = "none"
+
+
+class _TimeAxis:
+    """What an HDF5 says about its time (Audace FileWriter >= the card time
+    map): the attributes written by ``audace::formats::write_time_attrs``.
+
+    ``lines`` / ``ns`` / ``period_fs`` are the axis's nodes (attributes
+    ``time_map_line`` / ``time_map_ns`` / ``time_map_period_fs``): from node
+    ``k`` on, the time of file line ``i`` is ``ns[k] + ⌊(i − lines[k]) ·
+    period_fs[k] / 10⁶⌋`` — or, for a period 0, the file's own cadence. The
+    first node may sit before line 0 (the segment the file starts in). Empty
+    when the file carries no axis.
+    """
+
+    __slots__ = (
+        "correction", "lines", "ns", "period_fs", "start_ns", "nominal_start_ns",
+        "last_ns", "measured_hz", "error_ppm", "uncertainty_ns", "prior_ppm",
+        "state", "synchronized", "missing_shots",
+    )
+
+    def __init__(self, attrs):
+        self.correction = _str_attr(attrs, "time_correction")
+        lines = _int_list_attr(attrs, "time_map_line")
+        ns = _int_list_attr(attrs, "time_map_ns")
+        period = _int_list_attr(attrs, "time_map_period_fs")
+        ok = (
+            lines is not None and ns is not None and period is not None
+            and 0 < len(lines) == len(ns) == len(period)
+            and all(a < b for a, b in zip(lines, lines[1:]))
+            and all(p >= 0 for p in period)
+        )
+        self.lines = lines if ok else []
+        self.ns = ns if ok else []
+        self.period_fs = period if ok else []
+        self.start_ns = _opt_int_attr(attrs, "timestamp_ns")
+        self.nominal_start_ns = _opt_int_attr(attrs, "timestamp_nominal_ns")
+        self.last_ns = _opt_int_attr(attrs, "timestamp_last_ns")
+        self.measured_hz = _positive_float_attr(attrs, "trig_frequency_measured_hz")
+        self.error_ppm = _float_attr(attrs, "trig_frequency_error_ppm")
+        self.uncertainty_ns = _opt_int_attr(attrs, "time_uncertainty_ns")
+        self.prior_ppm = _float_attr(attrs, "time_prior_ppm")
+        self.state = _str_attr(attrs, "time_correction_state")
+        sync = _opt_int_attr(attrs, "time_reference_synchronized")
+        self.synchronized = None if sync is None else bool(sync)
+        self.missing_shots = _opt_int_attr(attrs, "missing_shots") or 0
+
+    @property
+    def corrected(self) -> bool:
+        """The file is timed by the card's time map and carries its axis."""
+        return self.correction == CORRECTION_CARDCLOCK_V1 and bool(self.lines)
+
+
+def _read_time_axis(attrs) -> Optional[_TimeAxis]:
+    """The file's time attributes, ``None`` for a file that has none
+    (written before them, or converted from such a file)."""
+    if _str_attr(attrs, "time_correction") not in (CORRECTION_NONE, CORRECTION_CARDCLOCK_V1):
+        return None
+    return _TimeAxis(attrs)
+
+
 def _filter_ids(dataset) -> set:
     """Filter names / ids of an h5py dataset's pipeline, as strings (a filter
     h5py has no name for, such as zstd, appears as its numeric id)."""
@@ -250,6 +373,12 @@ class _Hdf5Backend:
         self._cursor = 0
 
         attrs = self._file.attrs
+        # The card's time map, when the recorder stamped the file from it
+        # (``time_correction`` = ``"cardclock-v1"``): then ``timestamp_ns`` is
+        # the CORRECTED time of the first line and the axis gives every
+        # line's. ``None`` on older files.
+        self.time_axis = _read_time_axis(attrs)
+        corrected = self.time_axis is not None and self.time_axis.correction == CORRECTION_CARDCLOCK_V1
         self._header = Header(
             line_size=int(attrs["line_size"]),
             trig_frequency=int(attrs["trig_frequency"]),
@@ -279,6 +408,9 @@ class _Hdf5Backend:
             # external trigger; the File falls back on `trig_frequency`.
             trig_clock_hz=_int_attr(attrs, "trig_clock_hz", 0, _U32_MAX),
             trig_period_ticks=_int_attr(attrs, "trig_period_ticks", 0, _U32_MAX),
+            # What the acquisition library reads back for such a file: its
+            # start time is the corrected one (kept through a DAT export).
+            time_flags=TIME_FLAG_CORRECTED if corrected else 0,
         )
         # `clock / ticks` as a float, for MATLAB / HDFView users. Normally
         # redundant with the rational above (same writer, same value); kept
