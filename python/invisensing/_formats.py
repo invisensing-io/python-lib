@@ -164,6 +164,46 @@ class _DatBackend:
 
 _ZSTD_FILTER_ID = "32015"
 
+_U32_MAX = 0xFFFF_FFFF
+_I64_MAX = 0x7FFF_FFFF_FFFF_FFFF
+
+
+def _int_attr(attrs, name: str, lo: int, hi: int) -> int:
+    """An integer attribute within ``[lo, hi]``, or ``0`` when it is absent,
+    not an integer, or out of range.
+
+    For the optional attributes whose ``0`` means "unknown": a value the
+    native :class:`Header` cannot hold (a negative clock, a period past
+    ``u32``) or a non-integer is the same "unknown", not a reason to refuse
+    a recording whose samples are fine.
+    """
+    value = attrs.get(name)
+    if value is None:
+        return 0
+    try:
+        arr = np.asarray(value)
+        if arr.size != 1 or arr.dtype.kind not in "iu":
+            return 0
+        v = int(arr.reshape(()))
+    except (TypeError, ValueError):
+        return 0
+    return v if lo <= v <= hi else 0
+
+
+def _positive_float_attr(attrs, name: str) -> Optional[float]:
+    """A finite, strictly positive numeric attribute, or ``None``."""
+    value = attrs.get(name)
+    if value is None:
+        return None
+    try:
+        arr = np.asarray(value)
+        if arr.size != 1 or arr.dtype.kind not in "iuf":
+            return None
+        v = float(arr.reshape(()))
+    except (TypeError, ValueError):
+        return None
+    return v if np.isfinite(v) and v > 0 else None
+
 
 def _filter_ids(dataset) -> set:
     """Filter names / ids of an h5py dataset's pipeline, as strings (a filter
@@ -220,6 +260,11 @@ class _Hdf5Backend:
             pulse_width=int(attrs.get("pulse_width", 0)),
             num_channels=int(attrs.get("num_channels", 1)),
             timestamp=str(attrs.get("timestamp", "")),
+            # The exact acquisition anchor (i64 ns, UTC), written beside the
+            # display string whenever the capture has one. It is what
+            # `File.line_time_ns` counts from; absent on legacy captures,
+            # where 0 says "no anchor" exactly as it does for a DAT.
+            acquisition_ns=_int_attr(attrs, "timestamp_ns", 1, _I64_MAX),
             # Absent on files written before the attribute existed; 0 is also
             # the right answer for a capture taken with no pre-roll.
             trigger_delay=int(attrs.get("trigger_delay", 0)),
@@ -229,6 +274,17 @@ class _Hdf5Backend:
             # and `undefined` through the HDF5 one, for no reason a caller
             # could see.
             content_type=int(attrs.get("content_type", 0)),
+            # The card's trigger rational (since the real-frequency
+            # recordings). Absent — 0, unknown — on older files and for an
+            # external trigger; the File falls back on `trig_frequency`.
+            trig_clock_hz=_int_attr(attrs, "trig_clock_hz", 0, _U32_MAX),
+            trig_period_ticks=_int_attr(attrs, "trig_period_ticks", 0, _U32_MAX),
+        )
+        # `clock / ticks` as a float, for MATLAB / HDFView users. Normally
+        # redundant with the rational above (same writer, same value); kept
+        # for a file that carries it alone.
+        self.trig_frequency_real_hz_attr = _positive_float_attr(
+            attrs, "trig_frequency_real_hz"
         )
 
     def _require_open(self):

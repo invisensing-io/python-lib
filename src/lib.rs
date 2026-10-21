@@ -73,6 +73,49 @@ mod offsets {
     /// before the field existed — and zero is also the right value for
     /// "no delay".
     pub const TRIGGER_DELAY: usize = 84;
+    /// u32 LE, the clock the card's trigger period is counted in (Hz). With
+    /// [`TRIG_PERIOD_TICKS`], the cadence the card really fires at:
+    /// `trig_clock_hz / trig_period_ticks`. Both zero when unknown (captures
+    /// written before the fields existed, external trigger).
+    pub const TRIG_CLOCK_HZ: usize = 88;
+    /// u32 LE, the trigger period in ticks of [`TRIG_CLOCK_HZ`].
+    pub const TRIG_PERIOD_TICKS: usize = 92;
+}
+
+const NS_PER_S: u128 = 1_000_000_000;
+
+/// The card's trigger rational `(clock_hz, period_ticks)` when it can
+/// describe a stream whose integer `trig_frequency` is the given one: both
+/// terms non-zero, and `clock / ticks` within 1 % (or within 1 Hz) of
+/// `trig_frequency`. Mirrors the producer's guard
+/// (`audace::trig_timing::TriggerTiming::consistent_with`) term for term, so
+/// a file is timed identically by the acquisition and by this SDK.
+///
+/// A legitimate card rational is off its requested integer by less than one
+/// tick in a period (< 0.08 % over 1 kHz–200 kHz). A rational that is not
+/// within the guard was left behind in the reserved bytes of a header whose
+/// `trig_frequency` was rewritten, or written by a producer that used those
+/// bytes for something else: it describes another stream and is ignored.
+fn consistent_rational(clock_hz: u32, period_ticks: u32, trig_frequency: i32) -> Option<(u32, u32)> {
+    if clock_hz == 0 || period_ticks == 0 || trig_frequency <= 0 {
+        return None;
+    }
+    // Compare `clock / ticks` with `f` in clock units: `clock` vs `f · ticks`.
+    let ticks = period_ticks as u128;
+    let nominal = trig_frequency as u128 * ticks;
+    let diff = (clock_hz as u128).abs_diff(nominal);
+    if diff * 100 < nominal || diff < ticks {
+        Some((clock_hz, period_ticks))
+    } else {
+        None
+    }
+}
+
+/// `⌊lines · ticks · 10⁹ / clock⌋` ns in exact integer arithmetic (u128: no
+/// overflow for any `u64` count), saturated to `i64::MAX`. `clock > 0`.
+fn rational_lines_to_ns(clock_hz: u32, period_ticks: u32, lines: u64) -> i64 {
+    let ns = lines as u128 * period_ticks as u128 * NS_PER_S / clock_hz as u128;
+    ns.min(i64::MAX as u128) as i64
 }
 
 /// Lowercase tag for a `content_type` byte (mirrors `audace::types::ContentType`).
@@ -113,6 +156,10 @@ fn read_i32_le(buf: &[u8], offset: usize) -> i32 {
     i32::from_le_bytes(buf[offset..offset + 4].try_into().unwrap())
 }
 
+fn read_u32_le(buf: &[u8], offset: usize) -> u32 {
+    u32::from_le_bytes(buf[offset..offset + 4].try_into().unwrap())
+}
+
 // ── Parsed header (Python-exposed) ──────────────────────────────────────────
 
 /// 128-byte Audace `DataHeader` parsed into Python-friendly fields.
@@ -146,6 +193,34 @@ pub struct Header {
     /// publishing the decimated rate). The producer converts. `0` means no
     /// pre-roll, and is also what captures written before the field hold.
     pub trigger_delay: u32,
+    /// Clock the card counts its trigger period in, Hz (DataHeader bytes
+    /// 88..92; HDF5 attribute `trig_clock_hz`). Raw value as stored: `0`
+    /// when unknown. Use `trig_timing` for the value the timing helpers act
+    /// on (it drops a rational that does not describe `trig_frequency`).
+    pub trig_clock_hz: u32,
+    /// Trigger period in ticks of `trig_clock_hz` (DataHeader bytes 92..96;
+    /// HDF5 attribute `trig_period_ticks`). Raw value as stored: `0` when
+    /// unknown.
+    pub trig_period_ticks: u32,
+}
+
+impl Header {
+    /// The consistent card rational, see [`consistent_rational`].
+    fn rational(&self) -> Option<(u32, u32)> {
+        consistent_rational(self.trig_clock_hz, self.trig_period_ticks, self.trig_frequency)
+    }
+
+    /// The cadence lines are timed with: the card's rational when known and
+    /// consistent, else the nominal `trig_frequency / 1`; `None` without any
+    /// cadence (`trig_frequency <= 0` and no rational).
+    fn line_rational(&self) -> Option<(u32, u32)> {
+        self.rational().or_else(|| {
+            u32::try_from(self.trig_frequency)
+                .ok()
+                .filter(|&f| f > 0)
+                .map(|f| (f, 1))
+        })
+    }
 }
 
 #[pymethods]
@@ -167,6 +242,8 @@ impl Header {
         content_type = 0,
         acquisition_ns = 0,
         trigger_delay = 0,
+        trig_clock_hz = 0,
+        trig_period_ticks = 0,
     ))]
     #[allow(clippy::too_many_arguments)]
     fn new(
@@ -182,6 +259,8 @@ impl Header {
         content_type: u8,
         acquisition_ns: i64,
         trigger_delay: u32,
+        trig_clock_hz: u32,
+        trig_period_ticks: u32,
     ) -> Self {
         Self {
             timestamp,
@@ -196,7 +275,62 @@ impl Header {
             content_type,
             acquisition_ns,
             trigger_delay,
+            trig_clock_hz,
+            trig_period_ticks,
         }
+    }
+
+    /// The card's trigger rational `(trig_clock_hz, trig_period_ticks)`, or
+    /// `None` when the header does not carry one (both fields `0`: a capture
+    /// written before the fields existed, an external trigger) or carries
+    /// one that does not describe this header — `clock / ticks` more than
+    /// 1 % (and more than 1 Hz) away from `trig_frequency`, a rational left
+    /// behind by a header whose frequency was rewritten. Such a rational is
+    /// ignored by every timing helper.
+    #[getter]
+    fn trig_timing(&self) -> Option<(u32, u32)> {
+        self.rational()
+    }
+
+    /// The trigger rate the card really fires at, Hz:
+    /// `trig_clock_hz / trig_period_ticks` when `trig_timing` is known, else
+    /// `float(trig_frequency)` (the requested rate, which is then the only
+    /// one known).
+    #[getter]
+    fn trig_frequency_real_hz(&self) -> f64 {
+        match self.rational() {
+            Some((clock, ticks)) => clock as f64 / ticks as f64,
+            None => self.trig_frequency as f64,
+        }
+    }
+
+    /// `True` when the card fires exactly at the requested `trig_frequency`
+    /// (`trig_clock_hz == trig_frequency × trig_period_ticks`), and when the
+    /// real rate is unknown.
+    #[getter]
+    fn trig_frequency_is_exact(&self) -> bool {
+        match self.rational() {
+            Some((clock, ticks)) => {
+                clock as u64 == self.trig_frequency as u64 * ticks as u64
+            }
+            None => true,
+        }
+    }
+
+    /// Time of `lines` trigger periods, ns: `⌊lines · ticks · 10⁹ / clock⌋`
+    /// on the card's rational, or `⌊lines · 10⁹ / trig_frequency⌋` without
+    /// it — the same integer at an exact frequency. Saturates at `i64::MAX`;
+    /// `0` when the header has no cadence at all (`trig_frequency <= 0`).
+    fn lines_to_ns(&self, lines: u64) -> i64 {
+        self.line_rational()
+            .map_or(0, |(clock, ticks)| rational_lines_to_ns(clock, ticks, lines))
+    }
+
+    /// Acquisition time of trigger line `index` (0-based), ns since the Unix
+    /// epoch: `acquisition_ns + lines_to_ns(index)`. Relative to the start
+    /// of the file when the header carries no anchor (`acquisition_ns == 0`).
+    fn line_time_ns(&self, index: u64) -> i64 {
+        self.acquisition_ns.saturating_add(self.lines_to_ns(index))
     }
 
     /// Lowercase `content_type` tag (e.g. `"interleaved_hw_phase_amplitude"`,
@@ -276,13 +410,24 @@ impl Header {
     }
 
     fn __repr__(&self) -> String {
+        // The trigger rational only when the header carries one, so the
+        // representation of every older header is unchanged.
+        let timing = if self.trig_clock_hz != 0 || self.trig_period_ticks != 0 {
+            format!(
+                ", trig_clock_hz={}, trig_period_ticks={}",
+                self.trig_clock_hz, self.trig_period_ticks
+            )
+        } else {
+            String::new()
+        };
         format!(
-            "Header(line_size={}, sample_size={}, sample_rate={}, trig_frequency={}, \
+            "Header(line_size={}, sample_size={}, sample_rate={}, trig_frequency={}{}, \
              flags=0x{:X}, positions_per_line={}, interleaved={}, float={}, unsigned={})",
             self.line_size,
             self.sample_size,
             self.sample_rate,
             self.trig_frequency,
+            timing,
             self.flags,
             self.positions_per_line(),
             self.is_interleaved(),
@@ -345,11 +490,9 @@ fn parse_header(bytes: &[u8]) -> PyResult<Header> {
         num_channels: read_i32_le(bytes, offsets::NUM_CHANNELS),
         content_type: bytes[offsets::CONTENT_TYPE],
         acquisition_ns,
-        trigger_delay: u32::from_le_bytes(
-            bytes[offsets::TRIGGER_DELAY..offsets::TRIGGER_DELAY + 4]
-                .try_into()
-                .expect("4 bytes inside a >= 128-byte buffer"),
-        ),
+        trigger_delay: read_u32_le(bytes, offsets::TRIGGER_DELAY),
+        trig_clock_hz: read_u32_le(bytes, offsets::TRIG_CLOCK_HZ),
+        trig_period_ticks: read_u32_le(bytes, offsets::TRIG_PERIOD_TICKS),
     })
 }
 
@@ -936,6 +1079,12 @@ fn build_header_bytes<'py>(py: Python<'py>, header: &Header) -> PyResult<Bound<'
     // Trigger pre-roll (bytes 84..88), u32 LE.
     buf[offsets::TRIGGER_DELAY..offsets::TRIGGER_DELAY + 4]
         .copy_from_slice(&header.trigger_delay.to_le_bytes());
+    // Trigger rational (bytes 88..96), u32 LE each, written as stored: zero
+    // on every header that does not carry one.
+    buf[offsets::TRIG_CLOCK_HZ..offsets::TRIG_CLOCK_HZ + 4]
+        .copy_from_slice(&header.trig_clock_hz.to_le_bytes());
+    buf[offsets::TRIG_PERIOD_TICKS..offsets::TRIG_PERIOD_TICKS + 4]
+        .copy_from_slice(&header.trig_period_ticks.to_le_bytes());
 
     Ok(PyBytes::new(py, &buf))
 }

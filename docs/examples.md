@@ -26,7 +26,8 @@ with File("capture.dat") as f:
     print(f"Pulses:             {f.num_lines:,}")
     print(f"Positions per pulse:{f.positions_per_line:,}")
     print(f"Sample rate:        {f.sample_rate / 1e6:.0f} MSps")
-    print(f"Trigger rate:       {f.trig_frequency} Hz")
+    print(f"Trigger rate:       {f.trig_frequency} Hz requested, "
+          f"{f.trig_frequency_real_hz:.4f} Hz real")
     print(f"Duration:           {f.duration:.2f} s")
     print(f"Round-trip distance:{f.distance:.1f} m of fibre")
     print(f"Range:              ±{f.range:.2f} V")
@@ -101,7 +102,7 @@ with File("arctan_mag.dat") as f:
     assert f.mode is Mode.ARCTAN_MAGNITUDE
     mag_v = f.get_magnitude_volts(n=f.num_lines)   # (num_lines, positions), V
 
-    t = np.arange(mag_v.shape[0]) / f.trig_frequency
+    t = np.arange(mag_v.shape[0]) / f.trig_frequency_real_hz
     x_m = np.arange(mag_v.shape[1]) * (f.distance / mag_v.shape[1])
 
     plt.figure(figsize=(10, 6))
@@ -214,6 +215,11 @@ only accepts DAT), use `export_dat`:
 from invisensing import File, export_dat, Mode
 
 with File("acquisition.h5") as f:
+    # A DAT stores a whole number of hertz: converting a recording whose
+    # card fired at, say, 75007.5 Hz would lose its real rate (the
+    # Audace console refuses that conversion for the same reason).
+    if not f.trig_frequency_is_exact:
+        raise SystemExit(f"{f.trig_frequency_real_hz} Hz: keep it in HDF5")
     if f.mode is Mode.PHASE:
         samples = f.read_all()
         export_dat(

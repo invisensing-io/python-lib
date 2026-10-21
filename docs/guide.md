@@ -67,8 +67,8 @@ with File("acquisition.dat") as f:
     data = f.read_all()
 
 # outside the block: the handle is gone, the description is not
-dt   = 1.0 / f.trig_frequency          # fine
-axis = np.arange(f.num_lines) * dt     # fine
+dt   = 1.0 / f.trig_frequency_real_hz  # fine
+axis = np.arange(f.num_lines) * dt      # fine
 f.mode, f.dtype, f.shape, f.is_interleaved, repr(f)   # all fine
 ```
 
@@ -111,10 +111,15 @@ with File("acquisition.dat") as f:
     f.positions_per_line     # spatial fibre positions per pulse
     f.sample_size            # bytes per sample (2, 4, 8…)
     f.sample_rate            # Hz
-    f.trig_frequency         # Hz
+    f.trig_frequency         # Hz, the REQUESTED trigger rate (int)
+    f.trig_frequency_real_hz # Hz, the rate the card really fired at (float)
+    f.trig_frequency_is_exact  # True when both are equal (or unknown)
+    f.trig_clock_hz          # card rational (int), or None when unknown
+    f.trig_period_ticks      # real rate = trig_clock_hz / trig_period_ticks
+    f.line_time_ns(i)        # acquisition time of pulse i, int ns since epoch
     f.num_lines              # total trigger pulses recorded
     f.lines_left             # pulses behind the read cursor
-    f.duration               # seconds (= num_lines / trig_frequency)
+    f.duration               # seconds (= num_lines / trig_frequency_real_hz)
     f.distance               # metres of fibre covered per pulse
     f.range                  # ADC voltage range (V)
     f.timestamp              # producer-side timestamp string
@@ -129,6 +134,33 @@ with File("acquisition.dat") as f:
     f.is_demodulated, f.is_interleaved, f.is_float, f.is_phase
     f.is_unsigned, f.is_ac, f.is_hiz
 ```
+
+### Requested vs. real trigger frequency
+
+A card fires on a divided clock: it hits the requested rate exactly only
+when that rate divides its clock. A 250 MHz card asked for 75 kHz fires
+every 3333 ticks, at `250e6 / 3333 = 75007.5008` Hz (+100 ppm); timing
+the lines on 75 000 Hz drifts by 0.36 s per hour. Since 1.3.0 the SDK
+reads the card's exact rational from the recordings that carry it (HDF5
+attributes `trig_clock_hz`, `trig_period_ticks`, `trig_frequency_real_hz`;
+header bytes 88..96 of a `.dat`):
+
+| Property | Meaning |
+|---|---|
+| `trig_frequency` | the **requested** rate, an `int` (unchanged) |
+| `trig_frequency_real_hz` | the rate the card fired at, a `float` — `trig_clock_hz / trig_period_ticks`, else HDF5's `trig_frequency_real_hz`, else `float(trig_frequency)` |
+| `trig_frequency_is_exact` | `True` when real == requested, and when the real rate is unknown |
+| `trig_clock_hz`, `trig_period_ticks` | the card's rational, or `None` (older files, external trigger, TDMS, SEG-Y) |
+| `line_time_ns(i)` | `header.acquisition_ns + ⌊i · ticks · 10⁹ / clock⌋` (else `⌊i · 10⁹ / trig_frequency⌋`), an exact `int` |
+| `duration` | `num_lines / trig_frequency_real_hz` |
+
+Compute time axes and durations on `trig_frequency_real_hz` (or with
+`line_time_ns`); keep `trig_frequency` for sizing (pulses per block) and
+labels. At an exact rate and on every file without the rational, the
+results are bit-for-bit those of 1.2.x. A rational more than 1 % (and
+more than 1 Hz) away from `trig_frequency` cannot describe the file and
+is ignored (`trig_clock_hz` is then `None`; the stored values stay in
+`f.header.trig_clock_hz` / `f.header.trig_period_ticks`).
 
 ---
 

@@ -207,10 +207,15 @@ with File("acquisition.dat") as f:
     f.positions_per_line        # spatial positions per pulse (= line_size/2 if INTERLEAVED)
     f.sample_size               # bytes per sample
     f.sample_rate               # Hz
-    f.trig_frequency            # Hz
+    f.trig_frequency            # Hz, the REQUESTED trigger rate (int)
+    f.trig_frequency_real_hz    # Hz, the rate the card really fired at (float)
+    f.trig_frequency_is_exact   # True when both are equal (or the real one is unknown)
+    f.trig_clock_hz             # card rational, or None when unknown —
+    f.trig_period_ticks         #   real rate = trig_clock_hz / trig_period_ticks
+    f.line_time_ns(i)           # acquisition time of pulse i, int ns (Unix epoch)
     f.num_lines                 # total pulses recorded
     f.lines_left                # remaining behind the cursor
-    f.duration                  # seconds (= num_lines / trig_frequency)
+    f.duration                  # seconds (= num_lines / trig_frequency_real_hz)
     f.distance                  # metres of fibre covered by one pulse
     f.range                     # ADC voltage range (V)
     f.timestamp                 # producer-side timestamp string
@@ -252,7 +257,44 @@ Known tags: `raw`, `hw_phase`, `hw_arctan`, `hw_arctan_dui`, `hw_amplitude`,
 
 The acquisition timestamp is also surfaced as a precise `i64` nanosecond Unix
 instant via `f.header.acquisition_ns` (it is `0` when the file used the legacy
-ASCII timestamp string, which is still readable through `f.timestamp`).
+ASCII timestamp string, which is still readable through `f.timestamp`). For
+HDF5 it comes from the `timestamp_ns` attribute (since 1.3.0; earlier
+versions reported `0` for HDF5).
+
+### Real trigger frequency (since 1.3.0)
+
+A card fires on a divided clock, so it hits the requested trigger rate
+exactly only when that rate divides its clock. A 250 MHz PCIe7821 /
+PCIe7818 asked for 75 kHz programs a period of `floor(250e6 / 75000) =
+3333` ticks and fires at `250e6 / 3333 = 75007.5008` Hz (+100 ppm):
+counting time with the requested 75 000 Hz drifts by 0.36 s per hour.
+Recordings made with an inexact rate (HDF5 only — the acquisition refuses
+DAT, TDMS and SEG-Y for them) carry the card's exact rational:
+
+```python
+with File("acquisition.h5") as f:
+    f.trig_frequency            # 75000           — what was requested
+    f.trig_frequency_real_hz    # 75007.50075...  — what the card did
+    f.trig_frequency_is_exact   # False
+    f.trig_clock_hz, f.trig_period_ticks   # (250000000, 3333)
+
+    # Time axes and durations: use the real rate…
+    t_s = np.arange(f.num_lines) / f.trig_frequency_real_hz
+    # …or the exact integer timeline the acquisition stamped:
+    t0 = f.line_time_ns(0)      # header.acquisition_ns
+    t1 = f.line_time_ns(75_000) # t0 + 999_900_000 (not 1 s)
+```
+
+`line_time_ns(i)` is `acquisition_ns + ⌊i · ticks · 10⁹ / clock⌋` in exact
+integer arithmetic — the same integer the Audace acquisition computes. On
+an exact rate (2 000 Hz, 10 kHz, 200 kHz…) and on every file without the
+rational (older recordings, external trigger, DAT/TDMS/SEG-Y), the
+properties fall back on `trig_frequency` and every time and duration is
+exactly what 1.2.x computed. Where the rational is stored: HDF5 attributes
+`trig_clock_hz` (u32), `trig_period_ticks` (u32) and
+`trig_frequency_real_hz` (f64); in the 128-byte header, bytes 88..92 and
+92..96 (u32 LE, `0` = unknown). A rational more than 1 % (and more than
+1 Hz) away from `trig_frequency` does not describe the file and is ignored.
 
 ## Writing files
 

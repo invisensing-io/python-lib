@@ -25,6 +25,7 @@ data from it raises.
 
 from __future__ import annotations
 
+import operator
 import warnings
 from enum import Enum
 from pathlib import Path
@@ -191,7 +192,7 @@ class File:
 
         with File("acquisition.dat") as f:
             data = f.read_all()
-        dt = 1.0 / f.trig_frequency          # fine: metadata, not I/O
+        dt = 1.0 / f.trig_frequency_real_hz  # fine: metadata, not I/O
 
     numpy arrays already returned by :meth:`read_lines` or the channel
     extractors own their memory and remain valid and readable too.
@@ -223,6 +224,11 @@ class File:
         (``h5py`` / ``npTDMS`` / ``segyio``) that isn't installed. The
         message names the right ``pip install invisensing[<extra>]``.
     """
+
+    # HDF5's `trig_frequency_real_hz` attribute when it describes the file
+    # (set at open). A class-level default so that `__repr__` never trips on
+    # an instance whose construction stopped half way.
+    _real_hz_attr: Optional[float] = None
 
     # Suffix → backend class name (looked up in ``_formats``). Adding a
     # new format means adding an entry here and a class in ``_formats``.
@@ -265,6 +271,13 @@ class File:
         # answering after close(); see `close()` for why that matters.
         self._header = self._backend.header
         self._num_lines = int(self._backend.num_lines)
+        # HDF5's `trig_frequency_real_hz` attribute, kept only when it can
+        # describe this file (same guard as the header's rational). Every
+        # other backend has none.
+        self._real_hz_attr = _consistent_rate(
+            getattr(self._backend, "trig_frequency_real_hz_attr", None),
+            self._header.trig_frequency,
+        )
 
     # ── Lifecycle ──────────────────────────────────────────────────────
 
@@ -422,8 +435,91 @@ class File:
 
     @property
     def trig_frequency(self) -> int:
-        """Trigger pulse repetition rate in Hz."""
+        """**Requested** trigger pulse repetition rate in Hz (an integer).
+
+        The card fires at exactly this rate only when it divides the card's
+        clock; otherwise it fires slightly faster — see
+        :attr:`trig_frequency_real_hz`, which is the rate to compute times
+        and durations with. This integer stays the configured value: use it
+        to size blocks or to label the acquisition.
+        """
         return self._header.trig_frequency
+
+    @property
+    def trig_clock_hz(self) -> Optional[int]:
+        """Clock the card counts its trigger period in, Hz — or ``None``.
+
+        With :attr:`trig_period_ticks`, the exact rate the card fires at:
+        ``trig_clock_hz / trig_period_ticks``. ``None`` when the file does
+        not carry it (recordings made before it existed, an external
+        trigger, TDMS and SEG-Y files) **or** carries one that does not
+        describe this file's :attr:`trig_frequency` (more than 1 % and more
+        than 1 Hz away from it: left behind by a header whose frequency was
+        rewritten — it is ignored). The raw stored values are in
+        ``header.trig_clock_hz`` / ``header.trig_period_ticks``.
+        """
+        t = self._header.trig_timing
+        return None if t is None else int(t[0])
+
+    @property
+    def trig_period_ticks(self) -> Optional[int]:
+        """Trigger period in ticks of :attr:`trig_clock_hz` — or ``None``
+        (same rule as :attr:`trig_clock_hz`; both are ``None`` together)."""
+        t = self._header.trig_timing
+        return None if t is None else int(t[1])
+
+    @property
+    def trig_frequency_real_hz(self) -> float:
+        """The trigger rate the card **really** fired at, in Hz.
+
+        * ``trig_clock_hz / trig_period_ticks`` when the file carries the
+          card's rational (``75_000`` requested on a 250 MHz clock →
+          ``250e6 / 3333 = 75007.5008`` Hz);
+        * else HDF5's ``trig_frequency_real_hz`` attribute, when the file
+          carries it alone;
+        * else ``float(trig_frequency)`` — older recordings and external
+          triggers, where the requested rate is the only one known.
+
+        Use it for anything derived from the line cadence: time axes,
+        durations, the sampling rate of a spectrum along time.
+        """
+        t = self._header.trig_timing
+        if t is not None:
+            return t[0] / t[1]
+        if self._real_hz_attr is not None:
+            return self._real_hz_attr
+        return float(self._header.trig_frequency)
+
+    @property
+    def trig_frequency_is_exact(self) -> bool:
+        """``True`` when the card fired exactly at :attr:`trig_frequency`,
+        and when the real rate is unknown (then nothing says otherwise)."""
+        if self._header.trig_timing is not None:
+            return bool(self._header.trig_frequency_is_exact)
+        if self._real_hz_attr is not None:
+            return self._real_hz_attr == float(self._header.trig_frequency)
+        return True
+
+    def line_time_ns(self, i: int) -> int:
+        """Acquisition time of line (trigger pulse) ``i``, 0-based, in
+        nanoseconds since the Unix epoch.
+
+        ``header.acquisition_ns + ⌊i · trig_period_ticks · 10⁹ /
+        trig_clock_hz⌋`` when the file carries the card's rational, else
+        ``header.acquisition_ns + ⌊i · 10⁹ / trig_frequency⌋``. Exact
+        integer arithmetic: the very integer the acquisition stamped, and
+        at an exact frequency the same integer either way. When the file has
+        no anchor (``header.acquisition_ns == 0``: legacy ASCII timestamp)
+        the result is the offset from the first line.
+
+        ``i`` may exceed :attr:`num_lines` (the cadence extrapolates).
+        Raises :class:`ValueError` for a negative ``i`` and
+        :class:`TypeError` for a non-integer.
+        """
+        i = operator.index(i)
+        if i < 0:
+            raise ValueError(f"line index must be >= 0 (got {i})")
+        return self._header.line_time_ns(i)
 
     @property
     def num_lines(self) -> int:
@@ -494,8 +590,15 @@ class File:
 
     @property
     def duration(self) -> float:
-        """Total duration of the recording in seconds."""
-        return self.num_lines / max(self.trig_frequency, 1)
+        """Total duration of the recording in seconds:
+        ``num_lines / trig_frequency_real_hz``.
+
+        On a recording without a real rate (older files, external trigger)
+        this is ``num_lines / trig_frequency``, exactly as before.
+        """
+        if self._header.trig_timing is None and self._real_hz_attr is None:
+            return self.num_lines / max(self.trig_frequency, 1)
+        return self.num_lines / self.trig_frequency_real_hz
 
     @property
     def distance(self) -> float:
@@ -810,10 +913,15 @@ class File:
             # Construction failed before the header was read.
             return f"File({path!r}, unopened)"
         state = ", closed" if self.closed else ""
+        real = (
+            ""
+            if self.trig_frequency_is_exact
+            else f" (real {self.trig_frequency_real_hz:.4f} Hz)"
+        )
         return (
             f"File({path!r}, mode={self.mode.value}, "
             f"shape={self.shape}, sample_rate={self.sample_rate} Hz, "
-            f"trig_frequency={self.trig_frequency} Hz, "
+            f"trig_frequency={self.trig_frequency} Hz{real}, "
             f"duration={self.duration:.2f}s, distance={self.distance:.2f}m"
             f"{state})"
         )
@@ -827,6 +935,16 @@ def _dtype_for(h: Header) -> np.dtype:
     if h.is_float:
         return np.dtype(f"float{h.sample_size * 8}")
     return np.dtype(f"int{h.sample_size * 8}")
+
+
+def _consistent_rate(rate: Optional[float], trig_frequency: int) -> Optional[float]:
+    """``rate`` when it can be the real rate of a recording requested at
+    ``trig_frequency`` — within 1 % or within 1 Hz of it, the guard the
+    header's rational goes through — else ``None``."""
+    if rate is None or trig_frequency <= 0:
+        return None
+    diff = abs(rate - trig_frequency)
+    return rate if diff * 100 < trig_frequency or diff < 1 else None
 
 
 def _to_volts_i16(arr: np.ndarray, range_v: float) -> np.ndarray:
@@ -873,7 +991,11 @@ def export_dat(
     sample_rate
         Wire-side sample rate in Hz.
     trig_frequency
-        Trigger pulse rate in Hz.
+        Trigger pulse rate in Hz, a whole number. The file carries no card
+        rational (header bytes 88..96 are left zero), so a reader times it
+        on this integer: a DAT cannot record a rate that is not a whole
+        number of hertz — the Audace acquisition refuses DAT for such rates
+        and records them in HDF5.
     range_v
         ADC voltage range in volts (stored as mV in the header).
     timestamp
