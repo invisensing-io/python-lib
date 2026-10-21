@@ -269,6 +269,11 @@ CORRECTION_CARDCLOCK_V1 = "cardclock-v1"
 #: ``time_correction`` of a file timed by the count (no time map).
 CORRECTION_NONE = "none"
 
+#: The longest line period a time-axis node may carry, fs (1 000 s; a card's
+#: is 5 µs to 1 ms) — ``audace::time_map::MAX_PERIOD_FS``. An axis beyond it
+#: is forged or corrupt, and not trusted.
+_MAX_PERIOD_FS = 10**18
+
 
 class _TimeAxis:
     """What an HDF5 says about its time (Audace FileWriter >= the card time
@@ -297,7 +302,7 @@ class _TimeAxis:
             lines is not None and ns is not None and period is not None
             and 0 < len(lines) == len(ns) == len(period)
             and all(a < b for a, b in zip(lines, lines[1:]))
-            and all(p >= 0 for p in period)
+            and all(0 <= p <= _MAX_PERIOD_FS for p in period)
         )
         self.lines = lines if ok else []
         self.ns = ns if ok else []

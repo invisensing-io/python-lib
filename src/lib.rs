@@ -1158,6 +1158,11 @@ fn build_header_bytes<'py>(py: Python<'py>, header: &Header) -> PyResult<Bound<'
 
 const FS_PER_NS: i128 = 1_000_000;
 
+/// The longest line period a time-axis node may carry, fs (1 000 s; a card's
+/// is 5 µs to 1 ms) — Audace-Lib's `time_map::MAX_PERIOD_FS`. Beyond it an
+/// axis is forged or corrupt, and refused.
+const MAX_PERIOD_FS: u64 = 1_000_000_000_000_000_000;
+
 /// Time of file line `line` on a time axis: from node `k` on (the last node
 /// whose line is `<= line`, the first one for a line before every node),
 /// `ns[k] + ⌊(line − lines[k]) · period_fs[k] / 10⁶⌋`, or, for a node of
@@ -1168,17 +1173,21 @@ const FS_PER_NS: i128 = 1_000_000;
 fn axis_eval(lines: &[i64], ns: &[i64], period_fs: &[u64], timing: Option<(u32, u32)>, line: i64) -> i64 {
     let k = lines.partition_point(|&l| l <= line).saturating_sub(1);
     let d = line as i128 - lines[k] as i128;
+    // Checked products: |d| < 2⁶⁴, so a period within MAX_PERIOD_FS (and any
+    // u32 cadence) stays far inside i128 — and anything else saturates
+    // instead of panicking.
+    let sat = |p: Option<i128>| p.unwrap_or(if d < 0 { i128::MIN / 2 } else { i128::MAX / 2 });
     let dt = if period_fs[k] == 0 {
         match timing {
             Some((clock, ticks)) if clock > 0 => {
-                (d * ticks as i128 * NS_PER_S as i128).div_euclid(clock as i128)
+                sat(d.checked_mul(ticks as i128 * NS_PER_S as i128)).div_euclid(clock as i128)
             }
             _ => 0,
         }
     } else {
-        (d * period_fs[k] as i128).div_euclid(FS_PER_NS)
+        sat(d.checked_mul(period_fs[k] as i128)).div_euclid(FS_PER_NS)
     };
-    (ns[k] as i128 + dt).clamp(i64::MIN as i128, i64::MAX as i128) as i64
+    (ns[k] as i128).saturating_add(dt).clamp(i64::MIN as i128, i64::MAX as i128) as i64
 }
 
 /// The times of `count` consecutive file lines from `first` on, ns, as an
@@ -1208,6 +1217,9 @@ fn time_axis_ns<'py>(
     }
     if lines.windows(2).any(|w| w[0] >= w[1]) {
         return Err(PyValueError::new_err("time axis lines must be strictly increasing"));
+    }
+    if period_fs.iter().any(|&p| p > MAX_PERIOD_FS) {
+        return Err(PyValueError::new_err("a time axis period beyond 1 000 s per line: forged or corrupt"));
     }
     let out: Vec<i64> = py.allow_threads(|| {
         (0..count as i64)

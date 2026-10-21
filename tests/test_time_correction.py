@@ -248,6 +248,23 @@ def test_a_broken_axis_is_ignored(tmp_path):
         assert f.line_time_ns(10) == ANCHOR + 10 * 500_000
 
 
+def test_a_forged_axis_is_refused_and_never_overflows(tmp_path):
+    # A node at the most negative line with the largest period: the product
+    # would overflow an i128. The file's axis is not trusted (the count from
+    # its start), and the native vector refuses it — no panic either way.
+    i64_min = -(2**63)
+    attrs = _corrected_attrs([(i64_min, 0, 2**64 - 1)], nominal_start=ANCHOR)
+    path = _write_hdf5(tmp_path / "forged.hdf5", time_attrs=attrs)
+    with File(path) as f:
+        assert f.line_time_ns(10) == ANCHOR + 10 * 500_000
+        assert f.times_ns(0, 3).tolist() == [ANCHOR, ANCHOR + 500_000, ANCHOR + 1_000_000]
+    with pytest.raises(ValueError):
+        time_axis_ns([i64_min], [0], [2**64 - 1], None, 0, 3)
+    # Within the bound, the farthest line still saturates instead of wrapping.
+    far = time_axis_ns([i64_min], [0], [10**18], None, 2**63 - 3, 2)
+    assert far.tolist() == [2**63 - 1, 2**63 - 1]
+
+
 # ── 3. DAT: time_flags and line_offset in the header ───────────────────────
 
 
