@@ -72,7 +72,7 @@ from . import _legacy as _legacy_impl
 # Kept in step with pyproject.toml and Cargo.toml by
 # tests/test_version.py — on an isolated site this string is the only
 # way to tell which SDK is installed, so it must not drift again.
-__version__ = "1.2.1"
+__version__ = "1.3.0"
 
 __all__ = [
     "File",
