@@ -1,0 +1,77 @@
+# The trigger-rational guard (Audace-Lib TriggerTiming::consistent_with,
+# python-lib consistent_rational): one case per line,
+#   clock_hz period_ticks trig_frequency consistent(1/0)  # why
+# Rule: |clock/ticks - f| < f/q + 1 Hz, q = clock // 10 MHz; within 1 Hz
+# only when q < 3. Byte-identical copies: Audace-Lib
+# tests/fixtures/trig_guard_v1.txt, python-lib tests/assets/trig_guard_v1.txt.
+250000000 250000 1000 1  # 250 MHz card, 1000 Hz requested
+250000000 125000 2000 1  # 250 MHz card, 2000 Hz requested
+250000000 102040 2450 1  # 250 MHz card, 2450 Hz requested
+250000000 3333 75000 1  # 250 MHz card, 75000 Hz requested
+250000000 1666 150000 1  # 250 MHz card, 150000 Hz requested
+250000000 1250 199900 1  # 250 MHz card, 199900 Hz requested
+250000000 1250 200000 1  # 250 MHz card, 200000 Hz requested
+250000000 250 1000000 1  # 250 MHz card, 1000000 Hz requested
+250000000 249 1000001 1  # 250 MHz card, 1000001 Hz requested
+250000000 96 2580000 1  # 250 MHz card, 2580000 Hz requested
+250000000 75 3333333 1  # 250 MHz card, 3333333 Hz requested
+250000000 25 9615385 1  # 250 MHz card, 9615385 Hz requested
+250000000 25 9700000 1  # 250 MHz card, 9700000 Hz requested
+250000000 25 9999999 1  # 250 MHz card, 9999999 Hz requested
+250000000 25 10000000 1  # 250 MHz card, 10000000 Hz requested
+125000000 125000 1000 1  # 125 MHz card, 1000 Hz requested
+125000000 62500 2000 1  # 125 MHz card, 2000 Hz requested
+125000000 51020 2450 1  # 125 MHz card, 2450 Hz requested
+125000000 1666 75000 1  # 125 MHz card, 75000 Hz requested
+125000000 833 150000 1  # 125 MHz card, 150000 Hz requested
+125000000 625 199900 1  # 125 MHz card, 199900 Hz requested
+125000000 625 200000 1  # 125 MHz card, 200000 Hz requested
+125000000 125 1000000 1  # 125 MHz card, 1000000 Hz requested
+125000000 124 1000001 1  # 125 MHz card, 1000001 Hz requested
+125000000 48 2580000 1  # 125 MHz card, 2580000 Hz requested
+125000000 37 3333333 1  # 125 MHz card, 3333333 Hz requested
+125000000 12 9615385 1  # 125 MHz card, 9615385 Hz requested
+125000000 12 9700000 1  # 125 MHz card, 9700000 Hz requested
+125000000 12 9999999 1  # 125 MHz card, 9999999 Hz requested
+125000000 12 10000000 1  # 125 MHz card, 10000000 Hz requested
+250000000 3333 75007 1  # floor(real) of 75 kHz
+250000000 26 9615384 1  # floor(real) of 26 ticks
+250000000 12435885 20 1  # 1950 Hz in rows of 97 lines
+250000000 24997500 10 1  # 75000 Hz in rows of 7500 lines
+250000000 12019225 20 1  # 9615385 Hz in rows of 480769 lines
+125000000 5769228 20 1  # 9615385 Hz in rows of 480769 lines
+125000000 125000000 1 1  # 1000000 Hz in rows of 1000000 lines
+250000000 12500000 20 1  # 2000 Hz in rows of 100 lines
+250000000 3333 150000 0  # 75000 Hz rational, rate x2
+250000000 3333 37500 0  # 75000 Hz rational, rate /2
+250000000 3333 750000 0  # 75000 Hz rational, rate x10
+250000000 3333 750 0  # 75000 Hz rational, rate /100
+250000000 25 19400000 0  # 9700000 Hz rational, rate x2
+250000000 25 4850000 0  # 9700000 Hz rational, rate /2
+250000000 25 97000000 0  # 9700000 Hz rational, rate x10
+250000000 25 97000 0  # 9700000 Hz rational, rate /100
+125000000 125 2000000 0  # 1000000 Hz rational, rate x2
+125000000 125 500000 0  # 1000000 Hz rational, rate /2
+125000000 125 10000000 0  # 1000000 Hz rational, rate x10
+125000000 125 10000 0  # 1000000 Hz rational, rate /100
+250000000 250000 2000 0  # 1000 Hz rational, rate x2
+250000000 250000 500 0  # 1000 Hz rational, rate /2
+250000000 250000 10000 0  # 1000 Hz rational, rate x10
+250000000 250000 10 0  # 1000 Hz rational, rate /100
+250000000 12820500 39 0  # 19.5 Hz rows, rate x2
+250000000 1000 240383 0  # edge of f/25 + 1 Hz around 250 kHz
+250000000 1000 240384 1  # edge of f/25 + 1 Hz around 250 kHz
+250000000 1000 260417 1  # edge of f/25 + 1 Hz around 250 kHz
+250000000 1000 260418 0  # edge of f/25 + 1 Hz around 250 kHz
+250000000 24 9615385 0  # 24 ticks for a 25-tick request
+125000000 11 9615385 0  # 11 ticks for a 12-tick request
+101 1 100 0  # 101 Hz clock, 1 Hz off
+1009 10 100 1  # 0.9 Hz off
+20000000 3 6666666 1  # 20 MHz clock (q = 2), 0.67 Hz off
+20000000 3 6000000 0  # 20 MHz clock (q = 2), 11 % off
+30000000 3 9500000 1  # 30 MHz clock (q = 3), 5 % off
+1 20 1 1  # reduced 0.05 Hz rows, 0.95 Hz off
+250000000 3333 0 0  # zero rate
+250000000 3333 -75000 0  # negative rate
+4294967295 1 75000 0  # foreign bytes
+4294967295 4294967295 2147483647 0  # foreign bytes, extreme terms

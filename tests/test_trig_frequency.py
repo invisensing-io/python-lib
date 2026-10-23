@@ -3,7 +3,7 @@ Real trigger frequency: the card's rational, and the times counted on it.
 
 A card fires on a divided clock: a 250 MHz PCIe7821/PCIe7818 programs
 ``floor(250e6 / f)`` ticks, so it fires at exactly ``f`` only when ``f``
-divides the clock (27 values between 1 kHz and 200 kHz). Asked for 75 kHz,
+divides the clock (46 values between 1 kHz and 10 MHz). Asked for 75 kHz,
 it fires at ``250e6 / 3333 = 75007.5008`` Hz: timing lines on the requested
 integer drifts by 0.36 s an hour. Recordings now carry the rational —
 DataHeader bytes 88..92 / 92..96 (``trig_clock_hz`` / ``trig_period_ticks``,
@@ -16,8 +16,11 @@ What these tests pin down:
   is the very number 1.2.1 computed (bit-identical, not approximately);
 * at an inexact one, times follow the card: ``anchor + ⌊i · ticks · 10⁹ /
   clock⌋``, the integer the acquisition (Audace-Lib) stamps;
-* a rational that does not describe the file's ``trig_frequency`` (more
-  than 1 % and more than 1 Hz away) is ignored, as the producer does.
+* a rational that does not describe the file's ``trig_frequency`` (further
+  from it than a card's own quantization puts it: ``f / q + 1`` Hz, ``q =
+  clock // 10 MHz``) is ignored, as the producer does — on the table both
+  check (``tests/assets/trig_guard_v1.txt``, a byte-identical copy of
+  Audace-Lib's ``tests/fixtures/trig_guard_v1.txt``).
 
 Synthetic files only: DAT bytes are packed here with ``struct`` (not with
 the SDK's own writer, which is tested separately), HDF5 files with h5py.
@@ -33,19 +36,25 @@ import pytest
 
 from invisensing import File, Header, export_dat, parse_header
 from invisensing._core import build_header_bytes
+from invisensing._reader import _consistent_rate
 
 
 CLOCK = 250_000_000
+#: The guard's table, shared with Audace-Lib (byte-identical copies).
+GUARD_TABLE = Path(__file__).parent / "assets" / "trig_guard_v1.txt"
 I64_MAX = 2**63 - 1
 #: 2025-10-09T08:53:20Z — a realistic i64-ns acquisition anchor.
 ANCHOR = 1_760_000_000_000_000_000
 
-#: The 27 frequencies of the console's range (1 kHz–200 kHz) a 250 MHz
+#: The 46 frequencies of the console's range (1 kHz–10 MHz) a 250 MHz
 #: card fires exactly at: the divisors of 250 000 000 = 2⁶·5⁹.
 EXACT = [
     1_000, 1_250, 1_600, 2_000, 2_500, 3_125, 3_200, 4_000, 5_000, 6_250,
     8_000, 10_000, 12_500, 15_625, 16_000, 20_000, 25_000, 31_250, 40_000,
     50_000, 62_500, 78_125, 80_000, 100_000, 125_000, 156_250, 200_000,
+    250_000, 312_500, 390_625, 400_000, 500_000, 625_000, 781_250,
+    1_000_000, 1_250_000, 1_562_500, 1_953_125, 2_000_000, 2_500_000,
+    3_125_000, 3_906_250, 5_000_000, 6_250_000, 7_812_500, 10_000_000,
 ]
 
 #: Named rows of the system's conformance table (Audace-Lib
@@ -200,20 +209,82 @@ def test_the_guard_keeps_a_card_rational_and_drops_another_stream_s():
     # Left behind by a header whose rate was divided or multiplied.
     for f in (750, 37_500, 150_000):
         assert _header(f, r75).trig_timing is None, f
-    # The 1 % edge: 101 vs 100 is out, 100.9 is in.
+    # A clock no card counts in (101 Hz, 1 kHz): within 1 Hz only — 101 vs
+    # 100 is out, 100.9 is in.
     assert _header(100, (101, 1)).trig_timing is None
     assert _header(100, (1_009, 10)).trig_timing == (1_009, 10)
-    # Within 1 Hz is kept even past 1 %: a variance-row rate of 19.5 Hz
-    # (1 950 Hz over 100-line rows) whose integer was rounded to 20.
+    # A variance-row rate of 19.5 Hz (1 950 Hz over 100-line rows) whose
+    # integer was rounded to 20: kept. Its 250 MHz clock could fire at
+    # 10 MHz, so anything within 4 % + 1 Hz of 19.5 Hz is too (21); 22 is not.
     row = (CLOCK, (CLOCK // 1_950) * 100)
     assert _header(20, row).trig_timing == row
     assert _header(19, row).trig_timing == row
-    assert _header(21, row).trig_timing is None
+    assert _header(21, row).trig_timing == row
+    assert _header(22, row).trig_timing is None
+    assert _header(39, row).trig_timing is None
+    # Past 2.6 MHz the 1 % guard of before dropped a card's own rational:
+    # 9.7 MHz fires at 10 MHz (25 ticks, +3.1 %), kept; halved or doubled, not.
+    fast = (CLOCK, 25)
+    assert _header(9_700_000, fast).trig_timing == fast
+    assert _header(4_850_000, fast).trig_timing is None
+    assert _header(19_400_000, fast).trig_timing is None
     # Half a rational, a zero term, a non-positive request: unknown.
     assert _header(75_000, (CLOCK, 0)).trig_timing is None
     assert _header(75_000, (0, 3_333)).trig_timing is None
     assert _header(0, r75).trig_timing is None
     assert _header(-75_000, r75).trig_timing is None
+
+
+def _guard_table():
+    """The shared table of the guard: ``(clock, ticks, f, consistent, why)``."""
+    rows = []
+    for line in GUARD_TABLE.read_text().splitlines():
+        fields, _, why = line.partition("#")
+        v = [int(x) for x in fields.split()]
+        if v:
+            assert len(v) == 4, line
+            rows.append((v[0], v[1], v[2], v[3] == 1, why.strip()))
+    return rows
+
+
+def test_the_shared_guard_table():
+    """The very cases Audace-Lib checks (``the_shared_guard_table``)."""
+    rows = _guard_table()
+    assert len(rows) >= 40
+    for clock, ticks, f, consistent, why in rows:
+        want = (clock, ticks) if consistent else None
+        assert _header(f, (clock, ticks)).trig_timing == want, (clock, ticks, f, why)
+
+
+def test_every_card_rational_up_to_10_mhz_is_kept():
+    """A card's floor divider, on the PCIe cards' 250 MHz clock and on a
+    Spectrum's 125 MHz pulse clock, up to 10 MHz: less than one tick per
+    period off (+40 000 ppm near 10 MHz on 250 MHz, +83 333 ppm on
+    125 MHz), always kept — and so is its rate stored alone (HDF5)."""
+    freqs = list(range(1_000, 200_001, 997)) + list(range(200_001, 10_000_001, 49_999))
+    freqs += [1_000_001, 2_580_000, 9_615_385, 9_700_000, 9_999_999, 10_000_000]
+    for clock in (CLOCK, 125_000_000):
+        for f in freqs:
+            ticks = clock // f
+            assert _header(f, (clock, ticks)).trig_timing == (clock, ticks), (clock, f)
+            assert _consistent_rate(clock / ticks, f) == clock / ticks, (clock, f)
+            # Halved or doubled, the rate is another stream's.
+            assert _header(f * 2, (clock, ticks)).trig_timing is None, (clock, f)
+            assert _header(f // 2, (clock, ticks)).trig_timing is None, (clock, f)
+
+
+def test_a_rate_stored_alone_goes_through_the_guard_of_the_slowest_clock():
+    # Within f/12 + 1 Hz (12 ticks of 125 MHz at 10 MHz): kept.
+    assert _consistent_rate(75_007.5, 75_000) == 75_007.5
+    assert _consistent_rate(10_000_000.0, 9_700_000) == 10_000_000.0
+    assert _consistent_rate(125e6 / 12, 9_615_385) == 125e6 / 12  # +8.33 %
+    assert _consistent_rate(20.5, 20) == 20.5
+    # Beyond: another stream's rate.
+    assert _consistent_rate(11_000_000.0, 10_000_000) is None  # +10 %
+    assert _consistent_rate(75_007.5, 37_500) is None
+    assert _consistent_rate(75_007.5, 150_000) is None
+    assert _consistent_rate(None, 75_000) is None
+    assert _consistent_rate(75_007.5, 0) is None
 
 
 def test_a_dropped_rational_falls_back_on_the_requested_integer():

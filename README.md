@@ -293,8 +293,10 @@ properties fall back on `trig_frequency` and every time and duration is
 exactly what 1.2.x computed. Where the rational is stored: HDF5 attributes
 `trig_clock_hz` (u32), `trig_period_ticks` (u32) and
 `trig_frequency_real_hz` (f64); in the 128-byte header, bytes 88..92 and
-92..96 (u32 LE, `0` = unknown). A rational more than 1 % (and more than
-1 Hz) away from `trig_frequency` does not describe the file and is ignored.
+92..96 (u32 LE, `0` = unknown). A rational further from `trig_frequency`
+than a card's own quantization puts it — `f / q + 1` Hz, `q = ⌊clock /
+10 MHz⌋` ticks (25 on a 250 MHz clock: up to 4 % near 10 MHz) — does not
+describe the file and is ignored.
 
 ### Corrected line times (since 1.4.0)
 

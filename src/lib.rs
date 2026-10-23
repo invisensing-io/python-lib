@@ -103,18 +103,32 @@ pub mod time_flag_bits {
 
 const NS_PER_S: u128 = 1_000_000_000;
 
+/// The highest trigger frequency an Audace header carries, Hz (the
+/// acquisition's `audace::trig_timing::MAX_TRIG_FREQUENCY_HZ`).
+const MAX_TRIG_FREQUENCY_HZ: u128 = 10_000_000;
+
+/// Below this many ticks per period at [`MAX_TRIG_FREQUENCY_HZ`] (a clock
+/// under 30 MHz) a clock is no card's trigger clock: within 1 Hz only.
+const MIN_TICKS_AT_MAX_FREQUENCY: u128 = 3;
+
 /// The card's trigger rational `(clock_hz, period_ticks)` when it can
-/// describe a stream whose integer `trig_frequency` is the given one: both
-/// terms non-zero, and `clock / ticks` within 1 % (or within 1 Hz) of
-/// `trig_frequency`. Mirrors the producer's guard
-/// (`audace::trig_timing::TriggerTiming::consistent_with`) term for term, so
-/// a file is timed identically by the acquisition and by this SDK.
+/// describe a stream whose integer `trig_frequency` (`f`) is the given one:
+/// both terms non-zero, and `|clock / ticks − f| < f / q + 1 Hz`, where
+/// `q = ⌊clock / 10 MHz⌋` is the period, in ticks of this clock, of the
+/// fastest trigger a header carries (25 on 250 MHz, 12 on 125 MHz); within
+/// 1 Hz only when `q < 3` (a reduced fraction, not a card's clock). Mirrors
+/// the producer's guard (`audace::trig_timing::TriggerTiming::consistent_with`)
+/// term for term, so a file is timed identically by the acquisition and by
+/// this SDK; both check the shared table `tests/assets/trig_guard_v1.txt`.
 ///
-/// A legitimate card rational is off its requested integer by less than one
-/// tick in a period (< 0.08 % over 1 kHz–200 kHz). A rational that is not
-/// within the guard was left behind in the reserved bytes of a header whose
-/// `trig_frequency` was rewritten, or written by a producer that used those
-/// bytes for something else: it describes another stream and is ignored.
+/// A card fires on `ticks = ⌊clock / f⌋` and is off its requested integer by
+/// less than one tick in a period: less than `1/ticks ≤ 1/q` (+40 000 ppm at
+/// most up to 10 MHz on 250 MHz). The `1 Hz` covers a rate rounded to an
+/// integer (archive rows). A rational beyond that was left behind in the
+/// reserved bytes of a header whose `trig_frequency` was rewritten (a
+/// decimation, a row rate: ×2 is already 50 % off), or written by a producer
+/// that used those bytes for something else: it describes another stream
+/// and is ignored.
 fn consistent_rational(clock_hz: u32, period_ticks: u32, trig_frequency: i32) -> Option<(u32, u32)> {
     if clock_hz == 0 || period_ticks == 0 || trig_frequency <= 0 {
         return None;
@@ -123,11 +137,15 @@ fn consistent_rational(clock_hz: u32, period_ticks: u32, trig_frequency: i32) ->
     let ticks = period_ticks as u128;
     let nominal = trig_frequency as u128 * ticks;
     let diff = (clock_hz as u128).abs_diff(nominal);
-    if diff * 100 < nominal || diff < ticks {
-        Some((clock_hz, period_ticks))
+    let q = clock_hz as u128 / MAX_TRIG_FREQUENCY_HZ;
+    let consistent = if q < MIN_TICKS_AT_MAX_FREQUENCY {
+        // Within 1 Hz: |clock/ticks − f| < 1.
+        diff < ticks
     } else {
-        None
-    }
+        // |clock/ticks − f| < f/q + 1, times q·ticks.
+        diff * q < nominal + q * ticks
+    };
+    consistent.then_some((clock_hz, period_ticks))
 }
 
 /// `⌊lines · ticks · 10⁹ / clock⌋` ns in exact integer arithmetic (u128: no
@@ -333,10 +351,11 @@ impl Header {
     /// The card's trigger rational `(trig_clock_hz, trig_period_ticks)`, or
     /// `None` when the header does not carry one (both fields `0`: a capture
     /// written before the fields existed, an external trigger) or carries
-    /// one that does not describe this header — `clock / ticks` more than
-    /// 1 % (and more than 1 Hz) away from `trig_frequency`, a rational left
-    /// behind by a header whose frequency was rewritten. Such a rational is
-    /// ignored by every timing helper.
+    /// one that does not describe this header — `clock / ticks` further from
+    /// `trig_frequency` than any card's quantization puts it (see
+    /// `consistent_rational`), a rational left behind by a header whose
+    /// frequency was rewritten. Such a rational is ignored by every timing
+    /// helper.
     #[getter]
     fn trig_timing(&self) -> Option<(u32, u32)> {
         self.rational()

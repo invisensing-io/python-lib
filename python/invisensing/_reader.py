@@ -466,8 +466,9 @@ class File:
         ``trig_clock_hz / trig_period_ticks``. ``None`` when the file does
         not carry it (recordings made before it existed, an external
         trigger, TDMS and SEG-Y files) **or** carries one that does not
-        describe this file's :attr:`trig_frequency` (more than 1 % and more
-        than 1 Hz away from it: left behind by a header whose frequency was
+        describe this file's :attr:`trig_frequency` (further from it than
+        a card's own quantization puts it — one tick of ``trig_clock_hz``
+        at 10 MHz, plus 1 Hz: left behind by a header whose frequency was
         rewritten — it is ignored). The raw stored values are in
         ``header.trig_clock_hz`` / ``header.trig_period_ticks``.
         """
@@ -1093,14 +1094,29 @@ def _axis_time_ns(lines, ns, period_fs, timing, line: int) -> int:
     return _clamp_i64(ns[k] + dt)
 
 
+#: The highest trigger frequency an Audace header carries, Hz.
+_MAX_TRIG_FREQUENCY_HZ = 10_000_000
+#: The slowest clock a card counts its trigger period in: a Spectrum M2p's
+#: 125 MHz pulse generator (the PCIe cards count in 250 MHz).
+_SLOWEST_TRIGGER_CLOCK_HZ = 125_000_000
+
+
 def _consistent_rate(rate: Optional[float], trig_frequency: int) -> Optional[float]:
     """``rate`` when it can be the real rate of a recording requested at
-    ``trig_frequency`` — within 1 % or within 1 Hz of it, the guard the
-    header's rational goes through — else ``None``."""
+    ``trig_frequency`` (``f``), else ``None``.
+
+    The guard the header's rational goes through (``consistent_rational`` in
+    the native core, ``TriggerTiming::consistent_with`` in the acquisition):
+    ``|rate − f| < f / q + 1`` Hz, ``q`` being the period, in ticks, of the
+    fastest trigger (10 MHz) on the card's clock. A rate stored alone
+    carries no clock, so ``q`` is that of the slowest trigger clock of any
+    card (125 MHz: ``q = 12``, a card's floor divider is off by less than
+    1/12, 8.3 %), which keeps every rate a card can fire at."""
     if rate is None or trig_frequency <= 0:
         return None
+    q = _SLOWEST_TRIGGER_CLOCK_HZ // _MAX_TRIG_FREQUENCY_HZ
     diff = abs(rate - trig_frequency)
-    return rate if diff * 100 < trig_frequency or diff < 1 else None
+    return rate if diff * q < trig_frequency + q else None
 
 
 def _to_volts_i16(arr: np.ndarray, range_v: float) -> np.ndarray:
