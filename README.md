@@ -3,16 +3,18 @@
 `invisensing` is the official Python library for reading **Distributed
 Acoustic Sensing (DAS)** acquisition files produced by the Audace
 platform. It handles every file format the platform writes (`.dat`,
-`.hdf5`, `.tdms`, `.sgy`) through a single uniform API, and exposes
-the channels each file actually contains — `I` / `Q` / `arctan` /
-`magnitude` / `phase` — in one method call, with the right dtype and
-optional physical-unit scaling.
+`.h5` / `.hdf5`, `.tdms`, `.sgy`) through a single uniform API, and exposes
+the channels each file actually contains — `phase` / `amplitude` /
+`arctan` / `I` / `Q` / raw samples — in one method call, with the right
+dtype and optional physical-unit scaling. What a file holds comes from its
+**content type** (data format v1, see below); files written before it are
+read from their header flags, exactly as before.
 
 The library is **format-agnostic but mode-faithful**: it never
 silently re-derives one demodulation product from another. The
 on-board DAQ DSP chain (fading suppression, spatial differential,
 detrend filter) is not reproducible in software from an earlier tap,
-so the channel you can extract is the one the FPGA wrote. Inspect
+so the channel you can extract is the one the acquisition wrote. Inspect
 ``file.mode`` to dispatch; the SDK raises a clear `ValueError` if you
 call an extractor that doesn't apply.
 
@@ -45,8 +47,9 @@ transparently. No Rust toolchain is required for end users.
 ```python
 from invisensing import File, Mode
 
-with File("acquisition.dat") as f:
-    print(f)                       # File('…', mode=iq, shape=…, …)
+with File("phase/2026-11-03_10-00-00.h5") as f:
+    print(f)                       # File('…', mode=phase, shape=…, …)
+    print(f.content_type_name)     # "dui_coherent_phase": what the samples are
     print(f.duration, "s")
     print(f.distance, "m of fibre")
 
@@ -54,15 +57,21 @@ with File("acquisition.dat") as f:
     match f.mode:
         case Mode.RAW:
             data = f.read_lines(1000)              # (1000, line_size) ADC codes
-        case Mode.IQ:
-            i = f.get_i()                          # (n, positions) i16
-            q = f.get_q()                          # (n, positions) i16
-            iq = f.get_iq()                        # (n, positions) complex64
-        case Mode.ARCTAN_MAGNITUDE:
-            arctan = f.get_arctan()                # (n, positions) i16
-            magnitude = f.get_magnitude()          # (n, positions) u16
         case Mode.PHASE:
             phase = f.get_phase()                  # (n, positions) f32 radians
+        case Mode.AMPLITUDE:
+            amplitude = f.get_amplitude()          # (n, positions) u16 or f32
+        case Mode.ARCTAN:
+            rad = f.get_arctan_radians()           # (n, positions) f32 radians
+        case Mode.I | Mode.Q:
+            column = f.read_lines(1000)            # (n, positions) i16
+        # Files written before data format v1 may hold pairs:
+        case Mode.IQ:
+            iq = f.get_iq()                        # (n, positions) complex64
+        case Mode.ARCTAN_MAGNITUDE:
+            arctan, magnitude = f.get_arctan(), f.get_magnitude()
+        case Mode.PHASE_AMPLITUDE:
+            phase, amplitude = f.get_phase(), f.get_amplitude()
 ```
 
 ## Streaming large files
@@ -88,8 +97,8 @@ one allocation.
 ## Output dtypes — raw codes vs. physical units
 
 I, Q, arctan, and √(I²+Q²) are **physically continuous quantities**
-(volts for I/Q/magnitude, radians for arctan) that the FPGA encodes as
-fixed-point integers on the wire. The SDK offers two flavours of
+(volts for I/Q/magnitude, radians for arctan) that the card encodes as
+fixed-point integers. The SDK offers two flavours of
 extractor for each lane:
 
 - **Default extractors** (`get_i`, `get_q`, `get_arctan`,
@@ -106,6 +115,14 @@ The full mapping per mode:
 | Mode | Method | dtype | Unit | Scaling applied |
 |---|---|---|---|---|
 | **Raw** | `read_lines()` | `int16` | ADC code | — |
+| **I** / **Q** | `get_i()` / `get_q()` | `int16` | ADC code | — |
+| **I** / **Q** | `get_i_volts()` / `get_q_volts()` | **`float32`** | **V** | `i16 × range / 32768` |
+| **Arctan** | `get_arctan()` | `int16` | fixed-point | `32767 ↔ +π` |
+| **Arctan** | `get_arctan_radians()` | **`float32`** | **rad** | `i16 × π / 32768` |
+| **Amplitude** | `get_amplitude()` | `uint16` (card) / `float32` | count | — |
+| **Amplitude** | `get_magnitude_volts()` | **`float32`** | **V** | card magnitude only: `× range / 32768` |
+| **Phase** | `read_lines()` / `get_phase()` | `float32` | **rad** | — |
+| **Variance** / **LogVariance** | `get_variance()` / `get_log_variance()` | `float32` | source unit² / — | `10^v − 1` ↔ `log10(1 + v)` |
 | **IQ** | `read_lines()` | `int16` | ADC code | wire layout `[I, Q, I, Q, …]` |
 | **IQ** | `get_i()` / `get_q()` | `int16` | ADC code | de-interleave only |
 | **IQ** | `get_iq()` | `complex64` | ADC code | `I + j·Q` packed |
@@ -116,14 +133,14 @@ The full mapping per mode:
 | **ArctanMagnitude** | `get_arctan_radians()` | **`float32`** | **rad** | `i16 × π / 32768` |
 | **ArctanMagnitude** | `get_magnitude()` | `uint16` | ADC code | bitcast from wire i16 |
 | **ArctanMagnitude** | `get_magnitude_volts()` | **`float32`** | **V** | `u16 × range / 32768` |
-| **Phase** | `read_lines()` / `get_phase()` | `float32` | **rad** | already converted by Cardcontrol (`i32 × π/32768`) |
+| **PhaseAmplitude** | `get_phase()` / `get_amplitude()` | `float32` | rad / count | de-interleave only |
 
-Phase mode is the only one whose payload is already floating-point on
-the wire — the conversion happens in the acquisition driver so
-consumers never need to know the vendor's `π/32768` scaling.
+A phase is always floating-point radians — the acquisition converts it
+before writing, so consumers never need to know the card's scaling.
 
-`f.dtype` always reflects what `read_lines()` will return, derived
-from `sample_size` and the `FLOAT` flag in the header.
+`f.dtype` always reflects what `read_lines()` will return: the content
+type's sample type (`int16`, `uint16`, `float32`); on a file written before
+the content type existed, `sample_size` and the `FLOAT` / `UNSIGNED` flags.
 
 ### When to pick which
 
@@ -150,15 +167,26 @@ complex64 in `get_iq_volts`).
 
 ## Channel extractors — what they mean per mode
 
-`PCIe7821` on-board DSP can emit four different products. The SDK
-maps each to the right extractor:
+`file.mode` comes from the file's content type (from its header flags
+on a file written before the content type existed). Since data format v1
+a recording holds **one quantity per file**: an interleaved product of the
+card or of the demodulation is split into two files, same name, sibling
+directories (`phase/` + `amplitude/`, `arctan/` + `magnitude/`,
+`i_component/` + `q_component/`; `f.sibling_path` finds the other one).
+The paired modes are the files written before.
 
-| Mode | Wire layout (per pulse) | Extractor(s) | Dtype out |
+| Mode | Layout (per pulse) | Extractor(s) | Dtype out |
 |---|---|---|---|
 | `Mode.RAW` | `[s0, s1, …, sN-1]` | `read_lines()` | `int16` |
+| `Mode.PHASE` | `[φ0, φ1, …]` | `get_phase()` | `float32` (radians) |
+| `Mode.AMPLITUDE` | `[a0, a1, …]` | `get_amplitude()` (= `get_magnitude()`) | `uint16` (card) / `float32` |
+| `Mode.ARCTAN` | `[atan0, atan1, …]` | `get_arctan()`, `get_arctan_radians()` | `int16` / `float32` |
+| `Mode.I`, `Mode.Q` | `[I0, I1, …]` | `get_i()` / `get_q()` | `int16` |
+| `Mode.CUSTOM` | a script's output | `read_lines()` | per content type |
+| `Mode.VARIANCE`, `Mode.LOG_VARIANCE` | zone variances (archive exports) | `get_variance()`, `get_log_variance()` | `float32` |
 | `Mode.IQ` | `[I0, Q0, I1, Q1, …]` | `get_i()`, `get_q()`, `get_iq()` | `int16` / `int16` / `complex64` |
 | `Mode.ARCTAN_MAGNITUDE` | `[atan0, √0, atan1, √1, …]` | `get_arctan()`, `get_magnitude()` | `int16` / `uint16` |
-| `Mode.PHASE` | `[φ0, φ1, …, φN-1]` | `get_phase()` | `float32` (radians) |
+| `Mode.PHASE_AMPLITUDE` | `[φ0, a0, φ1, a1, …]` | `get_phase()`, `get_amplitude()` | `float32` |
 
 Each extractor reads from the file *or* from a buffer you've already
 read — pass `data=` to reuse a buffer across extractors so the cursor
@@ -179,7 +207,7 @@ that names both the actual and the expected mode — no silent garbage:
 >>> with File("phase.dat") as f:
 ...     f.get_i()
 ValueError: get_i: file mode is 'phase', but this extractor only
-applies to 'iq'. Inspect file.mode to dispatch — see the Mode enum docs.
+applies to 'i' or 'iq'. Inspect file.mode to dispatch — see the Mode enum docs.
 ```
 
 ## Format auto-detection
@@ -219,8 +247,14 @@ with File("acquisition.dat") as f:
     f.distance                  # metres of fibre covered by one pulse
     f.range                     # ADC voltage range (V)
     f.timestamp                 # start time as the format spells it (see below)
-    f.content_type_name         # what the samples are: "hw_phase", "sw_mozart"…
-    f.card                      # "pcie7818" / "pcie7821" on a dual-card run, else None
+    f.content_type_name         # what the samples are: "dui_coherent_phase", "hw_amplitude"…
+    f.quantity, f.unit          # "phase", "rad" — from the content type
+    f.card                      # card code "p18" / "p21" / "s125" / "s500", or None
+    f.format_version            # 1 for data format v1, 0 before
+    f.duration_s                # whole seconds the writer recorded (None: not said)
+    f.spatial_step_m            # metres between two positions
+    f.temporal_step_s           # seconds between two lines
+    f.sibling_path              # the other file of a split pair, or None
     f.compression               # HDF5: "NONE" / "ZSTD" / "ZSTD_LOSSY_1E4"; None otherwise
     f.quantization_max_error_rad  # ZSTD_LOSSY_1E4 bound (rad), else None
     f.trailing_bytes            # DAT cut mid-line: bytes not read (0 normally)
@@ -241,53 +275,65 @@ with File("acquisition.dat") as f:
     f.header.num_channels       # active socket channels (1 or 2)
     f.header.content_type       # on-disk content descriptor byte (see below)
     f.header.content_type_name  # lowercase tag, e.g. "sw_mozart" / "raw" / "undefined"
-    f.header.card               # card tag (DAT bytes 65..81), or None
+    f.header.card               # card code (DAT bytes 65..81), or None
     f.header.acquisition_ns     # precise acquisition time, i64 ns Unix (0 if legacy ASCII)
 ```
 
 ### `content_type` — what the samples *are*
 
-The header carries a `content_type` byte (offset 64) describing the *meaning* of
-the samples, orthogonal to the width/sign `flags`. It is the reference for
-every file that carries it. Legacy captures (which had no such byte) decode as
-`undefined` (0) and keep the flag-based reading they always had.
+The header carries a `content_type` byte (offset 64; HDF5 attribute, TDMS
+property, SEG-Y text line `CONTENT-TYPE`) describing the *meaning* of the
+samples. One value stands for one quantity, one sample type and one
+producing chain: `dui_coherent_phase` (19) is an `f32` phase in radians out
+of the Phase+ demodulation, `hw_amplitude` (5) the card's `u16` magnitude,
+`viz_variance` (27) zone variances exported from the console's archives…
+It is the reference for every file that carries it. Legacy captures (which
+had no such byte) decode as `undefined` (0) and keep the flag-based reading
+they always had.
 
 ```python
-with File("acquisition.dat") as f:
-    if f.content_type_name == "sw_mozart":
-        ...   # GPU Mozart software phase (also f.is_mozart is True)
+from invisensing import File, content
+
+with File("acquisition.h5") as f:
+    content.quantity_of(f.content_type)   # "phase"
+    content.unit(f.content_type)          # "rad"
+    content.method_of(f.content_type)     # "DUI_COHERENT"
+    content.to_physical(3)                # arctan → rad: v · π / 32768
 ```
 
-Known tags (Audace-Lib's `ContentType`, values 0–14): `undefined`, `raw`,
-`hw_phase`, `hw_arctan`, `hw_arctan_dui`, `hw_amplitude`, `interleaved_hw_iq`,
-`interleaved_hw_arctan_amplitude`, `interleaved_hw_phase_amplitude`,
-`sw_mozart`, `sw_phase`, `sw_amplitude`, `sw_custom`, `hw_i`, `hw_q`. A value
-this SDK does not know reads `unknown(<n>)` — never `undefined` — unless the
-file names it itself (HDF5 / TDMS `content_type_name`, used by
-`f.content_type_name`).
+`invisensing.content` is the registry (values 0–28) with the
+acquisition's helpers (`quantity_of`, `members`, `member_of`,
+`sample_type`, `is_phase`, `is_stream_only`, `split_children`,
+`method_of`, `unit`, `to_physical`…); it is checked against the registry
+the acquisition publishes. A value this SDK does not know reads
+`unknown(<n>)` — never `undefined` — unless the file names it itself (HDF5
+/ TDMS `content_type_name`, used by `f.content_type_name`), and its samples
+are decoded from `sample_size` and the flags, with a warning.
 
-`f.is_mozart` follows the content type (`True` for `sw_mozart` only; `None`
-for `raw`); on a legacy file it keeps reading the `MOZART` flag. The
-`SCHUBERT` flag is deprecated: nothing is read from it, and `False` means
-"not Mozart", not "Schubert".
+`f.is_mozart` follows the content type (`True` for `sw_mozart` and
+`sw_mozart_plus`; `None` for `raw`); on a legacy file it keeps reading the
+`MOZART` flag. The `SCHUBERT` flag is deprecated: nothing is read from it,
+and `False` means "not Mozart", not "Schubert".
 
-A single-column `UNSIGNED` file — the `magnitude/` child of a split
-arctan/magnitude stream, `hw_amplitude` — reads as `uint16` in every format
-(an HDF5 stored as `int16` with `unsigned = 1`, or as `uint16`).
+A magnitude column — the `magnitude/` child of a split arctan/magnitude
+stream, `hw_amplitude` — reads as `uint16` in every format (an HDF5 stored
+as `int16` with `unsigned = 1`, or as `uint16`).
 
 The acquisition timestamp is also surfaced as a precise `i64` nanosecond Unix
 instant via `f.header.acquisition_ns` (it is `0` when the file used the legacy
 ASCII timestamp string, which is still readable through `f.timestamp`). For
 HDF5 it comes from the `timestamp_ns` attribute (since 1.3.0; earlier
-versions reported `0` for HDF5). TDMS and SEG-Y carry no absolute time — only
-a display string (`f.timestamp`, the node's local time with its UTC offset) —
-and no time flags: `acquisition_ns` is `0` for them.
+versions reported `0` for HDF5); in a TDMS from the `timestamp_ns` property
+and in a SEG-Y from the `TIMESTAMP NS` text line of data format v1. Older
+TDMS and SEG-Y files carry no absolute time — only a display string
+(`f.timestamp`, the node's local time with its UTC offset) — and neither
+format carries the time flags.
 
 ### Real trigger frequency (since 1.3.0)
 
 A card fires on a divided clock, so it hits the requested trigger rate
-exactly only when that rate divides its clock. A 250 MHz PCIe7821 /
-PCIe7818 asked for 75 kHz programs a period of `floor(250e6 / 75000) =
+exactly only when that rate divides its clock. A card on a 250 MHz
+clock asked for 75 kHz programs a period of `floor(250e6 / 75000) =
 3333` ticks and fires at `250e6 / 3333 = 75007.5008` Hz (+100 ppm):
 counting time with the requested 75 000 Hz drifts by 0.36 s per hour.
 Recordings made with an inexact rate (HDF5 only — the acquisition refuses
@@ -340,10 +386,40 @@ On a corrected file `timestamp_ns` is the corrected start and
 `trig_frequency_real_hz` as their sampling rate. Files without the
 attributes are timed exactly as before.
 
+## Data format v1 (since 1.4.0)
+
+Recordings made since the acquisition's data format v1 describe themselves
+in their header (all formats; `0` / absent on older files):
+
+- the **content type** fixes the sample type: a v1 file writes its
+  `FLOAT`, `UNSIGNED`, `INTERLEAVED`, `DEMODULATED`, `PHASE` and `MOZART`
+  flags as 0 (only `AC` and `HIZ` stay), and this SDK types and classifies
+  it from the content type alone (`f.dtype`, `f.mode`, the `is_*`
+  properties). Files with content type 0 are read from their flags, as
+  before;
+- every file holds **one quantity** (a pair is split into two files,
+  `f.sibling_path`);
+- `f.format_version` (1), `f.duration_s` (written when the file closed),
+  `f.spatial_step_m` and `f.temporal_step_s` (DAT bytes 104..120; HDF5 /
+  TDMS attributes in f64; SEG-Y text lines);
+- `f.card`: the code of the card that recorded it — `p18`, `p21`, `s125`
+  or `s500` — on every file (before v1 only the DAT files of a two-card run
+  carried it, read as the same codes);
+- new HDF5 files are named `.h5`; `.hdf5` is read as always;
+- SEG-Y textual headers are read from the file's bytes, in ASCII (what the
+  acquisition writes) or EBCDIC;
+- the archive exports of zone variances: `viz_variance` (27) and
+  `viz_logvar` (28, the console's Log scale `log10(1 + variance)`), with
+  `f.get_variance()` / `f.get_log_variance()` and, in HDF5,
+  `f.source_content_type` (the column the variance was computed from).
+
+The header bit `0x020`, never set by any producer, is now
+`FLAG_RESERVED`.
+
 ## Writing files
 
 ```python
-from invisensing import export_dat
+from invisensing import File, export_dat
 import numpy as np
 
 samples = np.random.randn(10_000, 512).astype("float32")
@@ -355,11 +431,25 @@ export_dat(
     range_v=1.0,
     timestamp="2026-05-25_12:34:56",
 )
+
+# A file of data format v1: say what the samples are.
+export_dat("phase.dat", samples, sample_rate=250_000_000, trig_frequency=2_000,
+           content_type=17, card="p21")
+
+# Lines 1000..2000 of a recording, with its whole header (content type,
+# card, steps, trigger pre-roll, the card's rational, start time of line 1000):
+with File("phase/2026-11-03_10-00-00.h5") as f:
+    f.export_dat("excerpt.dat", start=1000, count=1000)
 ```
 
 `export_dat` writes the 128-byte Audace header (matching the C-side
-wire format byte-for-byte) followed by the array's raw samples. The
-`FLOAT` flag is set automatically when `data.dtype.kind == 'f'`.
+wire format byte-for-byte) followed by the array's raw samples. Without a
+content type the `FLOAT` flag is set automatically when
+`data.dtype.kind == 'f'`. With `header=f.header` it copies every field of
+the source, as the acquisition's conversions do: a content type of the
+registry gives a v1 file (its flags, steps, card code, and the duration of
+the lines written), anything else a legacy copy. A recording whose card
+fired at an inexact rate is refused (keep it in HDF5).
 
 ## API stability
 

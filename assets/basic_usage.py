@@ -2,9 +2,9 @@
 Invisensing SDK — basic usage example.
 
 Demonstrates the recommended modern API:
-- Open any FileWriter format via the unified ``File`` facade.
-- Inspect the high-level mode (Raw / IQ / ArctanMag / Phase).
-- Extract the right channel automatically using ``Mode`` dispatch.
+- Open any recording via the unified ``File`` facade (DAT, HDF5, TDMS, SEG-Y).
+- Inspect what it holds (``mode``, from the file's content type).
+- Extract the right channel using ``Mode`` dispatch.
 - Stream large files with the iterator / ``read_lines`` loop.
 """
 
@@ -19,9 +19,12 @@ def process(pulse):
 def main(path: str) -> None:
     with File(path) as f:
         print(f)  # File('…', mode=…, shape=(N, line_size), …)
+        print(f"  content type: {f.content_type_name}, card: {f.card}, "
+              f"step: {f.spatial_step_m} m × {f.temporal_step_s} s")
 
-        # Dispatch on the high-level mode — works for every PCIe7821
-        # demodulation product plus plain Raw.
+        # Dispatch on what the file holds. Since data format v1 each file
+        # holds one quantity (a split pair's other half is f.sibling_path);
+        # the paired modes are files written before it.
         match f.mode:
             case Mode.RAW:
                 print("Raw ADC samples — streaming 1000 pulses at a time.")
@@ -29,8 +32,25 @@ def main(path: str) -> None:
                     chunk = f.read_lines(1000)
                     process(chunk)
 
+            case Mode.PHASE:
+                print("Phase — radians, one sample per spatial position.")
+                phase = f.get_phase(n=f.num_lines)
+                print(f"  phase: {phase.shape}, dtype={phase.dtype}")
+
+            case Mode.AMPLITUDE:
+                amplitude = f.get_amplitude(n=f.num_lines)
+                print(f"  amplitude: {amplitude.shape}, dtype={amplitude.dtype}")
+                print(f"  phase file beside it: {f.sibling_path}")
+
+            case Mode.ARCTAN:
+                rad = f.get_arctan_radians(n=f.num_lines)
+                print(f"  arctan: {rad.shape} rad, magnitude file: {f.sibling_path}")
+
+            case Mode.I | Mode.Q:
+                print(f"  {f.mode.value}: {f.read_lines(1000).shape}, other: {f.sibling_path}")
+
             case Mode.IQ:
-                print("IQ demod — extracting I and Q on each pulse.")
+                print("I/Q pairs — extracting I and Q on each pulse.")
                 for pulse in f:
                     process(pulse)        # pulse is wire layout [I, Q, I, Q, …]
                 # Or, in one shot for a small file:
@@ -39,20 +59,26 @@ def main(path: str) -> None:
                 #   q = f.get_q(data)
 
             case Mode.ARCTAN_MAGNITUDE:
-                print("Arctan/Magnitude — extracting both lanes.")
+                print("Arctan/magnitude pairs — extracting both lanes.")
                 buf = f.read_all()
                 arctan = f.get_arctan(buf)
                 magnitude = f.get_magnitude(buf)
                 print(f"  arctan: {arctan.shape}, dtype={arctan.dtype}")
                 print(f"  magnitude: {magnitude.shape}, dtype={magnitude.dtype}")
 
-            case Mode.PHASE:
-                print("Phase — radians, one sample per spatial position.")
-                phase = f.get_phase(n=f.num_lines)
-                print(f"  phase: {phase.shape}, dtype={phase.dtype}")
+            case Mode.PHASE_AMPLITUDE:
+                buf = f.read_all()
+                print(f"  phase: {f.get_phase(buf).shape}, amplitude: {f.get_amplitude(buf).shape}")
+
+            case Mode.VARIANCE | Mode.LOG_VARIANCE:
+                variance = f.get_variance(n=f.num_lines)
+                print(f"  zone variances: {variance.shape}, every {f.spatial_step_m} m")
+
+            case _:
+                print(f"  {f.mode.value}: read with f.read_lines()")
 
 
 if __name__ == "__main__":
     import sys
-    path = sys.argv[1] if len(sys.argv) > 1 else "acquisition.dat"
+    path = sys.argv[1] if len(sys.argv) > 1 else "acquisition.h5"
     main(path)

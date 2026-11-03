@@ -20,18 +20,24 @@ suffix and exposes the channels each file actually contains.
 
 ## Mode
 
-High-level acquisition mode of a file. Use this enum to dispatch on
-what the file contains:
+What a file holds, from its content type (from its header flags on a
+file written before the content type existed). Use this enum to dispatch
+on what the file contains:
 
 ```python
 from invisensing import File, Mode
 
-with File("acquisition.dat") as f:
+with File("acquisition.h5") as f:
     match f.mode:
         case Mode.RAW:               ...
-        case Mode.IQ:                ...
-        case Mode.ARCTAN_MAGNITUDE:  ...
         case Mode.PHASE:             ...
+        case Mode.AMPLITUDE:         ...
+        case Mode.ARCTAN:            ...
+        case Mode.I | Mode.Q:        ...
+        case Mode.IQ:                ...   # pairs, files written before data format v1
+        case Mode.ARCTAN_MAGNITUDE:  ...
+        case Mode.PHASE_AMPLITUDE:   ...
+        case Mode.CUSTOM | Mode.VARIANCE | Mode.LOG_VARIANCE: ...
 ```
 
 ::: invisensing.Mode
@@ -75,12 +81,22 @@ raw cursor (rare).
 
 ---
 
+## content
+
+The `content_type` registry of the Audace data format v1 and its helpers.
+
+::: invisensing.content
+
+---
+
 ## Header-flag constants
 
 The raw flag bits used by the Audace wire-format header. You typically
-don't need these — `File.is_*` properties and `Mode.from_flags()`
-cover the common cases. They're exposed for callers who need to
-inspect or build a `Header` by hand.
+don't need these — `File.is_*` properties and `File.mode` cover the
+common cases, from the content type. They're exposed for callers who need
+to inspect or build a `Header` by hand. A file of data format v1 writes
+every flag but `AC` and `HIZ` as 0 (the content type says the rest);
+the others describe the files written before it.
 
 | Constant | Hex | Meaning |
 |---|---|---|
@@ -89,12 +105,13 @@ inspect or build a `Header` by hand.
 | `FLAG_AC` | `0x004` | ADC was AC-coupled |
 | `FLAG_HIZ` | `0x008` | ADC ran in high-impedance mode |
 | `FLAG_SCHUBERT` | `0x010` | Deprecated: nothing is read from it (the content type is the reference) |
-| `FLAG_SPECTRUM` | `0x020` | (reserved, internal) |
+| `FLAG_RESERVED` | `0x020` | Reserved: never set by any producer |
 | `FLAG_MOZART` | `0x040` | Software-Mozart pipeline marker (read on legacy files only; `content_type` `sw_mozart` otherwise) |
 | `FLAG_PHASE` | `0x080` | Carries unwrapped DAS phase (rad) |
 | `FLAG_INTERLEAVED` | `0x100` | Wire carries 2 samples per spatial position |
 | `FLAG_UNSIGNED` | `0x200` | Odd lane of an INTERLEAVED pair is `u16`; on a single column, every sample is (read as `uint16`) |
 | `HEADER_SIZE` | `128` | Size of the wire header in bytes |
+| `FORMAT_VERSION` | `1` | The data format version this SDK reads in full (`File.format_version`) |
 
 ## Time-flag constants
 

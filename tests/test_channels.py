@@ -3,7 +3,7 @@ Tests for the new channel extractors (`get_i / get_q / get_arctan /
 get_magnitude / get_phase`) and the format auto-detection.
 
 We synthesise test files in-memory so the suite doesn't depend on a
-particular PCIe7821 capture — that way the kernel correctness is what's
+particular capture — that way the kernel correctness is what's
 under test, not a frozen acquisition.
 """
 
@@ -144,7 +144,7 @@ def test_iq_file_returns_volts_when_asked():
 
     with tempfile.TemporaryDirectory() as d:
         path = Path(d) / "iq.dat"
-        # range_v = 1900 mV (PCIe7821 nominal). We pass it via `range_v`
+        # range_v = 1900 mV (a card's nominal). We pass it via `range_v`
         # in the helper, which writes the header field in mV.
         _write_dat(path, interleaved, flags=FLAG_DEMODULATED | FLAG_INTERLEAVED)
         # _write_dat doesn't accept range, so patch the asset post-hoc by

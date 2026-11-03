@@ -3,10 +3,11 @@
 `invisensing` is the official Python library for reading
 **Distributed Acoustic Sensing (DAS)** acquisition files produced by
 the Invisensing Audace platform. It handles every file format the
-platform writes (`.dat`, `.hdf5`, `.tdms`, `.sgy`) through a single
-uniform API, and exposes the channels each file actually contains —
-**I / Q / arctan / magnitude / phase** — in one method call, with the
-right `dtype` and optional physical-unit scaling.
+platform writes (`.dat`, `.h5` / `.hdf5`, `.tdms`, `.sgy`) through a
+single uniform API, and exposes the channels each file actually contains
+— **phase / amplitude / arctan / I / Q / raw** — in one method call, with
+the right `dtype` and optional physical-unit scaling, from the file's
+content type.
 
 The hot path (header parsing, bytes → numpy conversion,
 de-interleave) is implemented in **Rust** and exposed through PyO3, so
@@ -48,22 +49,24 @@ compiling from the source distribution, which needs a Rust toolchain
 ```python
 from invisensing import File, Mode
 
-with File("acquisition.dat") as f:
-    print(f)                       # File('…', mode=iq, shape=…, …)
+with File("acquisition.h5") as f:
+    print(f)                       # File('…', mode=phase, shape=…, …)
     print(f"{f.duration:.1f}s of recording, {f.distance:.0f}m of fibre")
+    print(f.content_type_name, f.card, f.spatial_step_m)
 
     match f.mode:
         case Mode.RAW:
             data = f.read_lines(1000)              # (1000, line_size) ADC codes
-        case Mode.IQ:
-            i = f.get_i()                          # int16
-            q = f.get_q()
-            iq = f.get_iq_volts()                  # complex64, in volts
-        case Mode.ARCTAN_MAGNITUDE:
-            arctan = f.get_arctan_radians()        # float32 radians
-            magnitude = f.get_magnitude_volts()    # float32 volts
         case Mode.PHASE:
             phase = f.get_phase()                  # float32 radians
+        case Mode.AMPLITUDE:
+            magnitude = f.get_magnitude_volts()    # float32 volts
+        case Mode.ARCTAN:
+            arctan = f.get_arctan_radians()        # float32 radians
+        case Mode.I | Mode.Q:
+            column = f.read_lines(1000)            # int16
+        case Mode.IQ:                              # pairs: files before data format v1
+            iq = f.get_iq_volts()                  # complex64, in volts
 ```
 
 That's the whole API surface for 95% of use cases. The

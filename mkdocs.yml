@@ -9,7 +9,7 @@
 #     handled by .github/workflows/docs.yml on every push to master.
 
 site_name: Invisensing Python SDK
-site_description: Python library for reading PCIe7821 DAS acquisition files (DAT / HDF5 / TDMS / SEG-Y).
+site_description: Python library for reading Audace DAS acquisition files (DAT / HDF5 / TDMS / SEG-Y).
 site_url: https://invisensing-io.github.io/python-lib/
 repo_url: https://github.com/invisensing-io/python-lib
 repo_name: invisensing-io/python-lib

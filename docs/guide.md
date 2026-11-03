@@ -123,8 +123,14 @@ with File("acquisition.dat") as f:
     f.distance               # metres of fibre covered per pulse
     f.range                  # ADC voltage range (V)
     f.timestamp              # start time as the format spells it
-    f.content_type_name      # what the samples are ("hw_phase", "sw_mozart"…)
-    f.card                   # card tag on a dual-card run, else None
+    f.content_type_name      # what the samples are ("dui_coherent_phase", "hw_amplitude"…)
+    f.quantity, f.unit       # "phase", "rad" — from the content type
+    f.card                   # card code: "p18", "p21", "s125", "s500", or None
+    f.format_version         # 1 for data format v1, 0 before
+    f.duration_s             # whole seconds the writer recorded, or None
+    f.spatial_step_m         # metres between two positions
+    f.temporal_step_s        # seconds between two lines
+    f.sibling_path           # the other file of a split pair, or None
     f.compression            # HDF5: "NONE" / "ZSTD" / "ZSTD_LOSSY_1E4"
     f.trailing_bytes         # DAT cut mid-line: bytes not read (0 normally)
     f.dtype                  # numpy dtype of the wire samples
@@ -201,43 +207,57 @@ Every file written before the time map is timed exactly as 1.3.0 timed it.
 
 ---
 
-## Acquisition modes (`Mode` enum)
+## What a file holds (`Mode` enum)
 
-A PCIe7821 acquisition can run in one of four on-board DSP modes.
-Each produces a different file content. The `Mode` enum lets you
-dispatch on what's in the file with one `match` statement:
+`file.mode` comes from the file's **content type** — what the samples
+are, one value per quantity, sample type and producing chain
+(`invisensing.content`). A file written before the content type existed
+(`content_type == 0`) is read from its header flags, exactly as before.
+Since data format v1 a recording holds one quantity per file: an
+interleaved product (I/Q, arctan/magnitude, phase/amplitude) is written as
+two files, same name, sibling directories, and `f.sibling_path` finds the
+other one. The paired modes are the files written before.
 
 ```python
 from invisensing import Mode
 
-with File("acquisition.dat") as f:
+with File("acquisition.h5") as f:
     match f.mode:
         case Mode.RAW:               ...
+        case Mode.PHASE:             ...
+        case Mode.AMPLITUDE:         ...
+        case Mode.ARCTAN:            ...
+        case Mode.I | Mode.Q:        ...
         case Mode.IQ:                ...
         case Mode.ARCTAN_MAGNITUDE:  ...
-        case Mode.PHASE:             ...
+        case Mode.PHASE_AMPLITUDE:   ...
 ```
 
-| `Mode` | Wire layout per pulse | What the FPGA writes |
+| `Mode` | Layout per pulse | What it is |
 |---|---|---|
-| `RAW` | `[s₀, s₁, …, s_{N-1}]` | Raw ADC codes, no DSP |
-| `IQ` | `[I₀, Q₀, I₁, Q₁, …]` | I/Q pair after NCO + LPF, interleaved |
-| `ARCTAN_MAGNITUDE` | `[arctan₀, √₀, arctan₁, √₁, …]` | `arctan(Q/I)` + `√(I²+Q²)`, interleaved |
-| `PHASE` | `[φ₀, φ₁, …, φ_{N-1}]` | Unwrapped DAS phase, post fading-suppression + gauge differential + detrend |
+| `RAW` | `[s₀, s₁, …, s_{N-1}]` | Raw ADC codes, no demodulation |
+| `PHASE` | `[φ₀, φ₁, …]` | A phase in radians (`f32`): the card's, or a software demodulation's (`content_type_name` says which) |
+| `AMPLITUDE` | `[a₀, a₁, …]` | An amplitude: the card's `√(I²+Q²)` (`u16`, or `f32`), or a software front end's (`f32`) |
+| `ARCTAN` | `[arctan₀, arctan₁, …]` | The card's wrapped `arctan(Q/I)`, `i16`, `32767 ↔ +π` |
+| `I`, `Q` | `[I₀, I₁, …]` | The card's I or Q, `i16` |
+| `CUSTOM` | | A script's output |
+| `VARIANCE`, `LOG_VARIANCE` | | Zone variances exported from the console's archives (`get_variance`, `get_log_variance`) |
+| `IQ` | `[I₀, Q₀, I₁, Q₁, …]` | I/Q pairs (files written before data format v1) |
+| `ARCTAN_MAGNITUDE` | `[arctan₀, √₀, arctan₁, √₁, …]` | `arctan(Q/I)` + `√(I²+Q²)` pairs (same) |
+| `PHASE_AMPLITUDE` | `[φ₀, a₀, φ₁, a₁, …]` | Phase + amplitude pairs (same) |
 
 !!! warning "The SDK is mode-faithful, not mode-translating"
     The library **never** silently re-derives one product from
-    another. The on-board DSP chain (fading suppression, spatial
-    differential, detrend filter) is not reproducible in software
-    from an earlier tap, so the channel you can extract is the one
-    the FPGA wrote. Calling the wrong extractor raises a
+    another. The acquisition's demodulation chain is not reproducible in
+    software from an earlier tap, so the channel you can extract is the
+    one the acquisition wrote. Calling the wrong extractor raises a
     `ValueError` that names both modes:
 
     ```python
     >>> with File("phase.dat") as f:
     ...     f.get_i()
     ValueError: get_i: file mode is 'phase', but this extractor
-    only applies to 'iq'.
+    only applies to 'i' or 'iq'.
     ```
 
 ---
@@ -369,11 +389,14 @@ path.
 
 ### HDF5 — via `h5py`
 
-Audace HDF5 files store the samples as a `(num_traces,
-samples_per_trace)` dataset named `acoustic_data`, typed by
-`bytes_per_sample` and the `FLOAT` attribute. Every header field is
-mirrored as a scalar attribute. Lines are read slice by slice: a
-multi-GB capture never has to fit in RAM.
+Audace HDF5 files (`.h5` since data format v1, `.hdf5` before; both
+are read) store the samples as a `(num_traces, samples_per_trace)`
+dataset named `acoustic_data`, typed by the content type (`int16`,
+`uint16`, `float32`; on older files by `bytes_per_sample` and the `FLOAT`
+attribute). Every header field is mirrored as a scalar attribute — with
+data format v1 also `format_version`, `card`, `duration_s` and the steps
+in f64. Lines are read slice by slice: a multi-GB capture never has to fit
+in RAM.
 
 Recordings written with the FileWriter's `compression = ZSTD` store the
 dataset in chunks through the standard pipeline byte shuffle + zstd
@@ -383,16 +406,20 @@ before opening one with `h5py`, or the file does not open.
 
 ### TDMS — via `npTDMS`
 
-Single channel `acoustic_data` under the group `AudaceGroup`. Header
-fields travel as file-level properties.
+Single channel `acoustic_data` (lines flattened row-major) under one
+group — `Audace` for files of data format v1, `AudaceGroup` in older ones.
+Header fields travel as file-level properties.
 
 ### SEG-Y — via `segyio`
 
-One trace per fibre position, `samples_per_trace = line_size`
-(wire-side, doubled for `INTERLEAVED`). Header fields not expressible
-in the SEG-Y binary header are encoded as discrete lines in the
-EBCDIC textual header (e.g. `C21 HEADER FLAGS (raw bits):
-0xNNNNNNNN`). The SDK parses those back into a `Header`.
+One trace per line (trigger), whose samples run along the fibre:
+`samples_per_trace = line_size`. Header fields not expressible in the
+SEG-Y binary header are written as `KEY: value` lines of the textual
+header (e.g. `C16 - CONTENT-TYPE: dui_coherent_phase (19)`, `C21 HEADER
+FLAGS (raw bits): 0xNNNNNNNN`, `C24 CARD: p21`). The SDK reads the 3200
+bytes itself — in ASCII, what the acquisition writes, or EBCDIC — and
+parses them back into a `Header`. Unsigned 16-bit samples are stored as
+4-byte integers (`BYTES PER SAMPLE: 2`) and read back as `uint16`.
 
 ---
 
@@ -416,7 +443,25 @@ export_dat(
 )
 ```
 
-The `FLOAT` flag is set automatically when `data.dtype.kind == 'f'`.
+Without a content type the `FLOAT` flag is set automatically when
+`data.dtype.kind == 'f'`. To write a file of data format v1, say what the
+samples are — `content_type=` (and `card=`) — or copy a source file's
+whole header:
+
+```python
+export_dat("phase.dat", samples, sample_rate=250_000_000, trig_frequency=2_000,
+           content_type=17, card="p21")        # dui_phase, f32
+
+with File("phase/2026-11-03_10-00-00.h5") as f:
+    f.export_dat("excerpt.dat", start=1000, count=500)
+    # or: export_dat("x.dat", my_array, header=f.header)
+```
+
+A v1 file keeps only the `AC` and `HIZ` flags, carries the steps (kept or
+derived), the card code and the duration of the lines written; the data
+must be of the content type's sample type. A header of content type 0 (or
+of pairs, or an unknown value) is copied as it is. A recording whose card
+fired at an inexact rate is refused: a DAT never carries one.
 
 ---
 

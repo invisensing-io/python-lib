@@ -90,8 +90,8 @@ with File("iq.dat") as f:
 
 This gives you the *wrapped* (`±π`) phase computed in software from
 I/Q. For unwrapped + fading-suppressed + gauge-differential phase,
-acquire in `Mode.PHASE` directly instead — the FPGA does the heavy
-lifting.
+record a phase directly instead (`Mode.PHASE`) — the acquisition does
+the heavy lifting.
 
 ---
 
@@ -166,7 +166,7 @@ def physical_amplitude(f: File) -> np.ndarray:
             return f.read_lines(f.lines_left).astype(np.float32) * (f.range / 32768)
         case Mode.IQ:
             return np.abs(f.get_iq_volts())
-        case Mode.ARCTAN_MAGNITUDE:
+        case Mode.ARCTAN_MAGNITUDE | Mode.AMPLITUDE:
             return f.get_magnitude_volts()
         case Mode.PHASE:
             # Phase has no amplitude — return zeros to keep the
@@ -212,29 +212,23 @@ re-export an HDF5 capture as a DAT (e.g. for a downstream tool that
 only accepts DAT), use `export_dat`:
 
 ```python
-from invisensing import File, export_dat, Mode
+from invisensing import File
 
 with File("acquisition.h5") as f:
-    # A DAT stores a whole number of hertz: converting a recording whose
-    # card fired at, say, 75007.5 Hz would lose its real rate (the
-    # Audace console refuses that conversion for the same reason).
+    # A DAT stores a whole number of hertz: a recording whose card fired
+    # at, say, 75007.5 Hz is refused (ValueError) — the Audace console
+    # refuses that conversion for the same reason; keep it in HDF5.
     if not f.trig_frequency_is_exact:
         raise SystemExit(f"{f.trig_frequency_real_hz} Hz: keep it in HDF5")
-    if f.mode is Mode.PHASE:
-        samples = f.read_all()
-        export_dat(
-            "acquisition.dat",
-            samples,
-            sample_rate=f.sample_rate,
-            trig_frequency=f.trig_frequency,
-            range_v=f.range,
-            timestamp=f.timestamp,
-            flags=f.flags,           # preserve PHASE / FLOAT / DEMODULATED
-        )
+    f.export_dat("acquisition.dat")              # or start=…, count=…
 ```
 
-Round-trip is byte-perfect for the common cases — the 128-byte
-header is reconstructed and the samples are written verbatim.
+The whole header goes along — content type, card, steps, trigger
+pre-roll, the card's rational, the start time (of line `start`) — and
+the samples are written verbatim. A file of data format v1 stays v1
+(with the duration of the lines written); a file written before keeps
+its header as it is. `export_dat(path, data, header=f.header)` does the
+same for an array you computed.
 
 ---
 

@@ -1,7 +1,7 @@
 """
 Real trigger frequency: the card's rational, and the times counted on it.
 
-A card fires on a divided clock: a 250 MHz PCIe7821/PCIe7818 programs
+A card fires on a divided clock: a card on a 250 MHz clock programs
 ``floor(250e6 / f)`` ticks, so it fires at exactly ``f`` only when ``f``
 divides the clock (46 values between 1 kHz and 10 MHz). Asked for 75 kHz,
 it fires at ``250e6 / 3333 = 75007.5008`` Hz: timing lines on the requested
@@ -204,7 +204,7 @@ def test_named_rows_carry_the_card_rational():
 def test_the_guard_keeps_a_card_rational_and_drops_another_stream_s():
     r75 = (CLOCK, 3_333)
     assert _header(75_000, r75).trig_timing == r75
-    # The PCIe7818 used to write floor(real) instead of the request.
+    # One card used to write floor(real) instead of the request.
     assert _header(75_007, r75).trig_timing == r75
     # Left behind by a header whose rate was divided or multiplied.
     for f in (750, 37_500, 150_000):
@@ -257,8 +257,8 @@ def test_the_shared_guard_table():
 
 
 def test_every_card_rational_up_to_10_mhz_is_kept():
-    """A card's floor divider, on the PCIe cards' 250 MHz clock and on a
-    Spectrum's 125 MHz pulse clock, up to 10 MHz: less than one tick per
+    """A card's floor divider, on a 250 MHz clock and on a 125 MHz pulse
+    clock, up to 10 MHz: less than one tick per
     period off (+40 000 ppm near 10 MHz on 250 MHz, +83 333 ppm on
     125 MHz), always kept — and so is its rate stored alone (HDF5)."""
     freqs = list(range(1_000, 200_001, 997)) + list(range(200_001, 10_000_001, 49_999))
