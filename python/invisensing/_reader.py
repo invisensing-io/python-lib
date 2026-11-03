@@ -154,7 +154,10 @@ class Mode(Enum):
     #: The card's Q, ``int16`` (the ``q_component/`` file). Use :meth:`File.get_q`.
     Q = "q"
     #: A script's output (Sandbox), typed by its content type (or, for
-    #: ``sw_custom``, by its flags). Read with :meth:`File.read_lines`.
+    #: ``sw_custom``, by its flags). Read with :meth:`File.read_lines`. A
+    #: ``sw_custom`` file of a Sandbox older than data format v1 kept its
+    #: input's flags and takes its mode from them instead (``PHASE``,
+    #: ``IQ``, ``ARCTAN_MAGNITUDE`` or ``RAW``), as every reader before v1 did.
     CUSTOM = "custom"
     #: Zone variances of the console's archives (``viz_variance``,
     #: ``float32``, in the square of the source column's unit). Use
@@ -181,11 +184,13 @@ class Mode(Enum):
     def from_header(cls, h: Header) -> "Mode":
         """The mode of a file of header ``h``: from its content type; from
         its flags (:meth:`from_flags`) for content type 0, a value this SDK
-        does not know, or a ``sample_size`` the content type contradicts."""
+        does not know, a ``sample_size`` the content type contradicts, or a
+        ``sw_custom`` file of a Sandbox older than data format v1, which
+        kept its input's flags (``Header.mode_from_flags``)."""
+        if h.mode_from_flags:
+            return cls.from_flags(h.flags)
         ct = h.normalized_content_type
         info = _content.info(ct)
-        if ct == 0 or info is None or h.sample_size_contradicts_content_type:
-            return cls.from_flags(h.flags)
         if info.members is not None:
             return _PAIR_MODES[info.members[0].quantity]
         return _QUANTITY_MODES[info.quantity]
@@ -1687,15 +1692,16 @@ def _file_header(h: Header, dtype: np.dtype, line_size: int, lines: int) -> Head
     * a header whose content type is a single-column value of the
       registry becomes a **data format v1** header: ``format_version`` 1,
       the content type (an ``hw_amplitude`` with 4-byte samples, an older
-      demodulation's, is ``hw_amplitude_f32``), the file flags (AC and HIZ; FLOAT and UNSIGNED
-      too for ``sw_custom``, which they type), the steps kept or derived,
-      the card code, no stream-only time fields, and ``duration_s`` of the
-      lines written. ``dtype`` must be the content type's sample type;
-    * any other header — content type 0, pairs, a value this SDK does not
-      know or whose sample size it contradicts — is written as a **legacy
-      copy**: content type, flags (FLOAT set from ``dtype``, as
-      :func:`export_dat` always did), version, steps, card and duration as
-      they are.
+      demodulation's, is ``hw_amplitude_f32``), the file flags (AC and HIZ;
+      FLOAT and UNSIGNED too for ``sw_custom``, which they type), the steps
+      kept or derived, the card code, no stream-only time fields, and
+      ``duration_s`` of the lines written. ``dtype`` must be the content
+      type's sample type;
+    * any other header — content type 0, pairs (``sw_custom`` with
+      INTERLEAVED too), a value this SDK does not know or whose sample size
+      it contradicts — is written as a **legacy copy**: content type, flags
+      (FLOAT set from ``dtype``, as :func:`export_dat` always did), version,
+      steps, card and duration as they are.
     """
     if not h.trig_frequency_is_exact:
         raise ValueError(
@@ -1713,6 +1719,8 @@ def _file_header(h: Header, dtype: np.dtype, line_size: int, lines: int) -> Head
         and info is not None
         and info.members is None
         and not h.sample_size_contradicts_content_type
+        # Pairs under 12 (an older Sandbox's): no v1 file holds them.
+        and not h.is_interleaved
     )
     if not typed:
         flags = h.flags | FLAG_FLOAT if dtype.kind == "f" else h.flags & ~FLAG_FLOAT

@@ -197,6 +197,10 @@ def test_export_writes_the_producer_s_file_flags(registry, tmp_path, ct):
     `deprecated` ones go, `from_flags_only` ones stay only on the values
     typed by their flags (12)."""
     every = sum(f["bit"] for f in registry["flags"])
+    if ct == 12:
+        # INTERLEAVED on 12 means pairs, which no v1 file holds: written as
+        # a legacy copy (test_a_pre_v1_sw_custom_pair_file_splits).
+        every &= ~FLAG_INTERLEAVED
     dtype = {"i16": np.int16, "u16": np.uint16, "f32": np.float32,
              "from_flags": np.float32}[content.sample_type(ct)]
     path = tmp_path / "f.dat"
@@ -453,6 +457,105 @@ def test_an_f32_hw_amplitude_is_the_f32_magnitude(tmp_path, format_version, flag
     with File(path) as f:
         assert f.mode is Mode.AMPLITUDE and f.dtype == np.float32
         np.testing.assert_array_equal(f.get_amplitude(), values)
+
+
+# ── sw_custom (12) of a Sandbox older than v1: the flags, as before ───────
+#
+# The pre-v1 Sandbox relabelled every output 12 but kept its input's flags.
+# Every reader before v1 (1.3.0 included) took the mode, is_phase and
+# is_demodulated from the flags of every file; for such a 12 file they
+# still do. A v1 writer keeps only AC, HIZ, FLOAT and UNSIGNED on a 12 file
+# and refuses pairs: its files are custom.
+
+_PRE_V1_CUSTOM_FLAGS = [
+    0,
+    FLAG_FLOAT,
+    FLAG_UNSIGNED,
+    FLAG_DEMODULATED | FLAG_FLOAT | FLAG_PHASE,
+    FLAG_DEMODULATED | FLAG_FLOAT | FLAG_PHASE | FLAG_MOZART,
+    FLAG_DEMODULATED | FLAG_INTERLEAVED,
+    FLAG_DEMODULATED | FLAG_INTERLEAVED | FLAG_UNSIGNED,
+    FLAG_DEMODULATED | FLAG_FLOAT | FLAG_PHASE | FLAG_INTERLEAVED,
+]
+
+
+@pytest.mark.parametrize("flags", _PRE_V1_CUSTOM_FLAGS)
+def test_a_pre_v1_sw_custom_header_reads_as_its_flags_said(flags):
+    size = 4 if flags & FLAG_FLOAT else 2
+    h = _header(content_type=12, sample_size=size, flags=flags, line_size=8)
+    assert h.format_version == 0 and h.mode_from_flags
+    # The reading of every SDK before v1: everything from the flags.
+    assert Mode.from_header(h) is Mode.from_flags(flags)
+    assert h.is_phase is bool(flags & FLAG_PHASE)
+    assert h.is_demodulated is bool(flags & FLAG_DEMODULATED)
+    assert h.is_interleaved is bool(flags & FLAG_INTERLEAVED)
+    assert h.is_float is bool(flags & FLAG_FLOAT)
+    assert h.is_unsigned is bool(flags & FLAG_UNSIGNED)
+    assert h.positions_per_line == (4 if flags & FLAG_INTERLEAVED else 8)
+    # Unchanged since before v1 too: a content type answers is_mozart.
+    assert h.is_mozart is False
+
+
+def test_a_pre_v1_sw_custom_phase_file_reads_as_a_phase(tmp_path):
+    h = _header(content_type=12, sample_size=4, line_size=4,
+                flags=FLAG_DEMODULATED | FLAG_FLOAT | FLAG_PHASE)
+    phase = np.array([[0.25, -1.5, 3.0, 0.0], [1.0, 2.0, -3.0, 0.5]], dtype=np.float32)
+    path = tmp_path / "custom_phase.dat"
+    path.write_bytes(build_header_bytes(h) + phase.tobytes())
+    with File(path) as f:
+        assert f.mode is Mode.PHASE and f.is_phase and f.dtype == np.float32
+        np.testing.assert_array_equal(f.get_phase(n=2), phase)
+        assert f.content_type_name == "sw_custom"
+
+
+def test_a_pre_v1_sw_custom_pair_file_splits(tmp_path):
+    h = _header(content_type=12, sample_size=2, line_size=6,
+                flags=FLAG_DEMODULATED | FLAG_INTERLEAVED | FLAG_UNSIGNED)
+    arctan = np.array([[-32768, 0, 32767]], dtype=np.int16)
+    magnitude = np.array([[0, 40_000, 65_535]], dtype=np.uint16)
+    pairs = np.empty((1, 6), dtype=np.int16)
+    pairs[:, 0::2] = arctan
+    pairs[:, 1::2] = magnitude.view(np.int16)
+    path = tmp_path / "custom_pairs.dat"
+    path.write_bytes(build_header_bytes(h) + pairs.tobytes())
+    with File(path) as f:
+        assert f.mode is Mode.ARCTAN_MAGNITUDE
+        assert f.is_interleaved and f.positions_per_line == 3
+        np.testing.assert_array_equal(f.get_arctan(), arctan)
+        f.rewind()
+        got = f.get_magnitude()
+        assert got.dtype == np.uint16
+        np.testing.assert_array_equal(got, magnitude)
+        # A copy of pairs is a legacy copy, as the acquisition's conversion
+        # writes it (no v1 file holds pairs): read back the same way.
+        f.export_dat(tmp_path / "copy.dat")
+    with File(tmp_path / "copy.dat") as c:
+        assert (c.content_type, c.format_version, c.flags) == (12, 0, h.flags)
+        assert c.mode is Mode.ARCTAN_MAGNITUDE
+        np.testing.assert_array_equal(c.get_magnitude(), magnitude)
+
+
+@pytest.mark.parametrize(
+    "flags,mode",
+    [
+        # An older writer copied a v1 stream's bytes: PHASE / INTERLEAVED
+        # never survive a v1 writer, so they still mean the flags' reading.
+        (FLAG_DEMODULATED | FLAG_FLOAT | FLAG_PHASE, Mode.PHASE),
+        (FLAG_DEMODULATED | FLAG_INTERLEAVED, Mode.IQ),
+        # What a v1 writer leaves on a 12 file: a script's output.
+        (FLAG_FLOAT, Mode.CUSTOM),
+        (FLAG_UNSIGNED | FLAG_AC, Mode.CUSTOM),
+        (0, Mode.CUSTOM),
+    ],
+)
+def test_a_v1_sw_custom_header_is_custom_unless_its_flags_are_an_older_writer_s(flags, mode):
+    size = 4 if flags & FLAG_FLOAT else 2
+    h = _header(content_type=12, sample_size=size, flags=flags, format_version=1, line_size=8)
+    assert Mode.from_header(h) is mode
+    assert h.mode_from_flags is (mode is not Mode.CUSTOM)
+    assert h.is_phase is (mode is Mode.PHASE)
+    assert h.is_float is bool(flags & FLAG_FLOAT)
+    assert h.is_unsigned is bool(flags & FLAG_UNSIGNED)
 
 
 # ── The card code (bytes 65..81, every run since data format v1) ──────────

@@ -388,9 +388,24 @@ impl Header {
     }
 
     /// Whether what the samples ARE comes from the flags: content type 0, an
-    /// unassigned value, a contradicted `sample_size`.
+    /// unassigned value, a contradicted `sample_size`, or a 12 of a Sandbox
+    /// older than v1 ([`Self::pre_v1_custom`]).
     fn quantity_from_flags(&self) -> bool {
-        self.content_type == 0 || self.info().is_none() || self.contradicts()
+        self.content_type == 0 || self.info().is_none() || self.contradicts() || self.pre_v1_custom()
+    }
+
+    /// A value-12 (`sw_custom`) header of a Sandbox older than data format
+    /// v1: it relabelled every output 12 but kept its input's flags, which
+    /// say what the samples are (a phase, I/Q or arctan/magnitude pairs)
+    /// exactly as for content type 0 — how every reader before v1 read it.
+    /// Recognised by `format_version` 0, or by a PHASE or INTERLEAVED bit:
+    /// a v1 writer keeps only AC, HIZ, FLOAT and UNSIGNED on a 12 file and
+    /// refuses pairs, so those bits mean an older writer copied the stream's
+    /// v1 bytes.
+    fn pre_v1_custom(&self) -> bool {
+        self.content_type == 12
+            && (self.format_version == 0
+                || self.flags & (flag_bits::PHASE | flag_bits::INTERLEAVED) != 0)
     }
 
     /// `(bytes, float, unsigned)`: how every sample is stored — Audace-Lib's
@@ -651,6 +666,19 @@ impl Header {
     #[getter]
     fn sample_size_contradicts_content_type(&self) -> bool {
         self.contradicts()
+    }
+
+    /// `True` when what the samples are — `Mode`, `is_phase`,
+    /// `is_demodulated` — comes from the flags, as it did for every file
+    /// before data format v1: content type 0, a value this SDK does not
+    /// know, a `sample_size` the content type contradicts, or a
+    /// `sw_custom` (12) file of a Sandbox older than v1 (`format_version`
+    /// 0, or the PHASE or INTERLEAVED bit set), which kept its input's
+    /// flags. The sample type and the pairs of 0 and 12 always come from
+    /// the flags.
+    #[getter]
+    fn mode_from_flags(&self) -> bool {
+        self.quantity_from_flags()
     }
 
     /// `(bytes, float, unsigned)`: how each sample is stored — from the
