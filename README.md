@@ -168,7 +168,9 @@ complex64 in `get_iq_volts`).
 ## Channel extractors — what they mean per mode
 
 `file.mode` comes from the file's content type (from its header flags
-on a file written before the content type existed). Since data format v1
+on a file written before the content type existed, and on a `sw_custom`
+file of a Sandbox older than data format v1, which kept its input's
+flags: `f.header.mode_from_flags`). Since data format v1
 a recording holds **one quantity per file**: an interleaved product of the
 card or of the demodulation is split into two files, same name, sibling
 directories (`phase/` + `amplitude/`, `arctan/` + `magnitude/`,
