@@ -218,7 +218,12 @@ with File("acquisition.dat") as f:
     f.duration                  # seconds (= num_lines / trig_frequency_real_hz)
     f.distance                  # metres of fibre covered by one pulse
     f.range                     # ADC voltage range (V)
-    f.timestamp                 # producer-side timestamp string
+    f.timestamp                 # start time as the format spells it (see below)
+    f.content_type_name         # what the samples are: "hw_phase", "sw_mozart"…
+    f.card                      # "pcie7818" / "pcie7821" on a dual-card run, else None
+    f.compression               # HDF5: "NONE" / "ZSTD" / "ZSTD_LOSSY_1E4"; None otherwise
+    f.quantization_max_error_rad  # ZSTD_LOSSY_1E4 bound (rad), else None
+    f.trailing_bytes            # DAT cut mid-line: bytes not read (0 normally)
     f.dtype                     # numpy dtype of the wire samples
     f.shape                     # (num_lines, line_size)
     f.spatial_shape             # (num_lines, positions_per_line)
@@ -228,7 +233,7 @@ with File("acquisition.dat") as f:
     f.is_interleaved
     f.is_float
     f.is_phase
-    f.is_unsigned               # arctan/√ files only
+    f.is_unsigned               # arctan/√ pair, or the split magnitude/ column
     f.is_ac                     # ADC AC-coupled
     f.is_hiz                    # ADC high-impedance
 
@@ -236,30 +241,47 @@ with File("acquisition.dat") as f:
     f.header.num_channels       # active socket channels (1 or 2)
     f.header.content_type       # on-disk content descriptor byte (see below)
     f.header.content_type_name  # lowercase tag, e.g. "sw_mozart" / "raw" / "undefined"
+    f.header.card               # card tag (DAT bytes 65..81), or None
     f.header.acquisition_ns     # precise acquisition time, i64 ns Unix (0 if legacy ASCII)
 ```
 
 ### `content_type` — what the samples *are*
 
 The header carries a `content_type` byte (offset 64) describing the *meaning* of
-the samples, orthogonal to the width/sign `flags`. Legacy captures (which had no
-such byte) decode as `undefined` (0), so it is fully backward-compatible.
+the samples, orthogonal to the width/sign `flags`. It is the reference for
+every file that carries it. Legacy captures (which had no such byte) decode as
+`undefined` (0) and keep the flag-based reading they always had.
 
 ```python
 with File("acquisition.dat") as f:
-    if f.header.content_type_name == "sw_mozart":
-        ...   # GPU Mozart software phase
+    if f.content_type_name == "sw_mozart":
+        ...   # GPU Mozart software phase (also f.is_mozart is True)
 ```
 
-Known tags: `raw`, `hw_phase`, `hw_arctan`, `hw_arctan_dui`, `hw_amplitude`,
-`interleaved_hw_iq`, `interleaved_hw_arctan_amplitude`,
-`interleaved_hw_phase_amplitude`, `sw_mozart`, `undefined`.
+Known tags (Audace-Lib's `ContentType`, values 0–14): `undefined`, `raw`,
+`hw_phase`, `hw_arctan`, `hw_arctan_dui`, `hw_amplitude`, `interleaved_hw_iq`,
+`interleaved_hw_arctan_amplitude`, `interleaved_hw_phase_amplitude`,
+`sw_mozart`, `sw_phase`, `sw_amplitude`, `sw_custom`, `hw_i`, `hw_q`. A value
+this SDK does not know reads `unknown(<n>)` — never `undefined` — unless the
+file names it itself (HDF5 / TDMS `content_type_name`, used by
+`f.content_type_name`).
+
+`f.is_mozart` follows the content type (`True` for `sw_mozart` only; `None`
+for `raw`); on a legacy file it keeps reading the `MOZART` flag. The
+`SCHUBERT` flag is deprecated: nothing is read from it, and `False` means
+"not Mozart", not "Schubert".
+
+A single-column `UNSIGNED` file — the `magnitude/` child of a split
+arctan/magnitude stream, `hw_amplitude` — reads as `uint16` in every format
+(an HDF5 stored as `int16` with `unsigned = 1`, or as `uint16`).
 
 The acquisition timestamp is also surfaced as a precise `i64` nanosecond Unix
 instant via `f.header.acquisition_ns` (it is `0` when the file used the legacy
 ASCII timestamp string, which is still readable through `f.timestamp`). For
 HDF5 it comes from the `timestamp_ns` attribute (since 1.3.0; earlier
-versions reported `0` for HDF5).
+versions reported `0` for HDF5). TDMS and SEG-Y carry no absolute time — only
+a display string (`f.timestamp`, the node's local time with its UTC offset) —
+and no time flags: `acquisition_ns` is `0` for them.
 
 ### Real trigger frequency (since 1.3.0)
 

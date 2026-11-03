@@ -230,8 +230,9 @@ def test_a_file_timed_by_the_count_says_none_and_keeps_1_3_0_s_times(tmp_path):
 
 
 def test_an_inexact_cadence_without_a_map_times_bit_identically_to_1_3_0(tmp_path):
-    # 75 kHz → 3 333 ticks, the rational's own count.
-    path = _write_hdf5(tmp_path / "75k.hdf5", f=75_000, ticks=3_333)
+    # 75 kHz → 3 333 ticks, the rational's own count. 75 001 lines, so the
+    # vector reaches line 75 000 (it never runs past the file's last line).
+    path = _write_hdf5(tmp_path / "75k.hdf5", f=75_000, ticks=3_333, rows=75_001)
     with File(path) as f:
         for i in [0, 1, 74_999, 75_000, 270_000_000]:
             assert f.line_time_ns(i) == ANCHOR + i * 3_333 * 10**9 // CLOCK

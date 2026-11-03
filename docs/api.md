@@ -88,12 +88,12 @@ inspect or build a `Header` by hand.
 | `FLAG_FLOAT` | `0x002` | Samples are IEEE-754 floats |
 | `FLAG_AC` | `0x004` | ADC was AC-coupled |
 | `FLAG_HIZ` | `0x008` | ADC ran in high-impedance mode |
-| `FLAG_SCHUBERT` | `0x010` | (reserved, internal) |
+| `FLAG_SCHUBERT` | `0x010` | Deprecated: nothing is read from it (the content type is the reference) |
 | `FLAG_SPECTRUM` | `0x020` | (reserved, internal) |
-| `FLAG_MOZART` | `0x040` | Software-Mozart pipeline marker |
+| `FLAG_MOZART` | `0x040` | Software-Mozart pipeline marker (read on legacy files only; `content_type` `sw_mozart` otherwise) |
 | `FLAG_PHASE` | `0x080` | Carries unwrapped DAS phase (rad) |
 | `FLAG_INTERLEAVED` | `0x100` | Wire carries 2 samples per spatial position |
-| `FLAG_UNSIGNED` | `0x200` | Odd lane of an INTERLEAVED pair is `u16` |
+| `FLAG_UNSIGNED` | `0x200` | Odd lane of an INTERLEAVED pair is `u16`; on a single column, every sample is (read as `uint16`) |
 | `HEADER_SIZE` | `128` | Size of the wire header in bytes |
 
 ## Time-flag constants

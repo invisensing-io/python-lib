@@ -106,7 +106,9 @@ class Mode(Enum):
     """
 
     #: Plain ADC samples — no on-board DSP, no INTERLEAVED. Read with
-    #: :meth:`File.read_lines`.
+    #: :meth:`File.read_lines`. Also every other single column the modes
+    #: below do not name (a split child: arctan, I, Q, the ``uint16``
+    #: magnitude…): :attr:`File.content_type_name` says what it is.
     RAW = "raw"
     #: PCIe7821 IQ demodulation — INTERLEAVED ``[I, Q, I, Q, …]``,
     #: signed ``int16``. Use :meth:`File.get_i` / :meth:`File.get_q` /
@@ -242,6 +244,13 @@ class File:
     # The file's time attributes (HDF5 written from the card's time map),
     # set at open; ``None`` for every other file.
     _time_axis = None
+    # Read at open from the backend (HDF5 / TDMS attributes, DAT size);
+    # class-level defaults for the same reason as `_real_hz_attr`.
+    _content_type_name_attr: Optional[str] = None
+    _compression: Optional[str] = None
+    _quantization_step_rad: Optional[float] = None
+    _quantization_max_error_rad: Optional[float] = None
+    _trailing_bytes: int = 0
 
     # Suffix → backend class name (looked up in ``_formats``). Adding a
     # new format means adding an entry here and a class in ``_formats``.
@@ -293,6 +302,23 @@ class File:
         )
         # The card's time map as the recorder wrote it (HDF5 only).
         self._time_axis = getattr(self._backend, "time_axis", None)
+        # The writer's content-type tag (HDF5 / TDMS), the compression and
+        # the lossy bound (HDF5), and the bytes past the last whole line
+        # (DAT). Absent from a backend: unknown / none.
+        self._content_type_name_attr = getattr(self._backend, "content_type_name_attr", None)
+        self._compression = getattr(self._backend, "compression", None)
+        self._quantization_step_rad = getattr(self._backend, "quantization_step_rad", None)
+        self._quantization_max_error_rad = getattr(
+            self._backend, "quantization_max_error_rad", None
+        )
+        self._trailing_bytes = int(getattr(self._backend, "trailing_bytes", 0) or 0)
+        if self._trailing_bytes:
+            warnings.warn(
+                f"{path}: {self._trailing_bytes} byte(s) after the last whole line "
+                f"(line {self._num_lines}) — the file was cut short in the middle "
+                "of a line; that partial line is not read (File.trailing_bytes).",
+                stacklevel=2,
+            )
 
     # ── Lifecycle ──────────────────────────────────────────────────────
 
@@ -531,9 +557,12 @@ class File:
         * Any other file: ``header.acquisition_ns + ⌊i · trig_period_ticks ·
           10⁹ / trig_clock_hz⌋`` when it carries the card's rational, else
           ``header.acquisition_ns + ⌊i · 10⁹ / trig_frequency⌋`` — the
-          integer 1.3.0 gave. A DAT, SEG-Y or TDMS whose header says
+          integer 1.3.0 gave. A DAT whose header says
           :attr:`Header.time_corrected` starts at the corrected time of its
-          first line and counts from there.
+          first line and counts from there. TDMS and SEG-Y carry no absolute
+          time (only the display string :attr:`timestamp`) and no time
+          flags: ``header.acquisition_ns`` is ``0`` and the result is the
+          offset from the first line.
 
         ``nominal=True`` gives the count instead, as 1.3.0 computed it: from
         the file's ``timestamp_nominal_ns`` when it carries one, else from
@@ -566,15 +595,23 @@ class File:
         vector — :meth:`line_time_ns` of each line, the same integers,
         computed in the native core. Metadata only: no sample is read, and
         it works on a closed file.
+
+        ``count`` is clamped to the lines the file holds: the vector never
+        runs past :attr:`num_lines` (use :meth:`line_time_ns` to extrapolate
+        beyond the last line). Raises :class:`MemoryError` when the vector
+        cannot be allocated (a file that declares more lines than memory
+        can time).
         """
         start = operator.index(start)
         if start < 0:
             raise ValueError(f"start must be >= 0 (got {start})")
+        available = max(0, self._num_lines - start)
         if count is None:
-            count = max(0, self._num_lines - start)
+            count = available
         count = operator.index(count)
         if count < 0:
             raise ValueError(f"count must be >= 0 (got {count})")
+        count = min(count, available)
         timing = self._header.line_timing
         axis = self._time_axis
         if not nominal and axis is not None and axis.corrected:
@@ -590,13 +627,14 @@ class File:
     @property
     def time_correction(self) -> Optional[str]:
         """How the file's times were stamped, or ``None`` when it does not
-        say (files written before the card's time map, DAT/SEG-Y/TDMS
-        without the flag).
+        say (files written before the card's time map, a DAT without the
+        flag, and every TDMS and SEG-Y: neither format carries an absolute
+        time or the time flags).
 
         * ``"cardclock-v1"``: from the card's time map — ``timestamp_ns``
           and :meth:`line_time_ns` are the **corrected** times (the card's
           oscillator drift and lost shots taken out); the count is
-          ``line_time_ns(i, nominal=True)``. A DAT/SEG-Y/TDMS says so with
+          ``line_time_ns(i, nominal=True)``. A DAT says so with
           :attr:`Header.time_corrected` (its start time only).
         * ``"none"``: timed by the count (no time map for that run).
         """
@@ -638,8 +676,18 @@ class File:
 
     @property
     def num_lines(self) -> int:
-        """Total trigger pulses recorded in the file."""
+        """Total trigger pulses recorded in the file (whole lines only, see
+        :attr:`trailing_bytes`)."""
         return self._num_lines
+
+    @property
+    def trailing_bytes(self) -> int:
+        """Bytes after the last whole line of a ``.dat`` — ``0`` for a
+        complete file. Non-zero means the file was cut short in the middle
+        of a line (a recording stopped mid-write, a partial copy): those
+        bytes are not read, and opening the file emits a warning. Always
+        ``0`` for HDF5, TDMS and SEG-Y, which store whole lines."""
+        return self._trailing_bytes
 
     @property
     def lines_left(self) -> int:
@@ -654,8 +702,75 @@ class File:
 
     @property
     def timestamp(self) -> str:
-        """Acquisition start timestamp (free-form string from the producer)."""
+        """Acquisition start time as the file spells it — a string whose form
+        depends on the format:
+
+        * **DAT**: the header's anchor in nanoseconds since the Unix epoch
+          (UTC), as a decimal string (``"1790000000000000000"``); a capture
+          written before the binary anchor carries its free-form ASCII
+          string instead.
+        * **HDF5**: the ``timestamp`` attribute, the node's local time with
+          its UTC offset, to the millisecond
+          (``"2026-09-23 14:03:12.123+02:00"``) or the legacy string.
+        * **TDMS**: the ``timestamp`` property, same form as HDF5.
+        * **SEG-Y**: the ``TIMESTAMP`` line of the textual header, same form.
+
+        To compute with, use ``header.acquisition_ns`` (the exact anchor, ns,
+        UTC; ``0`` when the file has none — always for TDMS and SEG-Y, which
+        carry only this display string) and :meth:`line_time_ns`.
+        """
         return self._header.timestamp
+
+    @property
+    def content_type(self) -> int:
+        """What the samples are: the header's ``content_type`` byte (``0`` on
+        a capture written before the byte existed). See
+        :attr:`content_type_name`."""
+        return self._header.content_type
+
+    @property
+    def content_type_name(self) -> str:
+        """The lowercase tag of :attr:`content_type` (``"hw_phase"``,
+        ``"sw_mozart"``, ``"hw_amplitude"``…): ``"undefined"`` for a capture
+        written before the byte existed (``0``). A value this SDK does not
+        know (a newer producer) is named by the file's own tag when it
+        carries one (HDF5 / TDMS ``content_type_name``), else
+        ``"unknown(<n>)"``."""
+        name = self._header.content_type_name
+        if name.startswith("unknown(") and self._content_type_name_attr:
+            return self._content_type_name_attr
+        return name
+
+    @property
+    def card(self) -> Optional[str]:
+        """The acquisition card that recorded the file (``"pcie7818"``,
+        ``"pcie7821"``…) on a dual-card run, or ``None``: a single-card run,
+        an older capture, or a format that does not carry it (only the DAT
+        header does, bytes 65..81)."""
+        return self._header.card
+
+    @property
+    def compression(self) -> Optional[str]:
+        """The FileWriter ``compression`` an HDF5 was written with:
+        ``"NONE"``, ``"ZSTD"`` (lossless) or ``"ZSTD_LOSSY_1E4"`` (phase
+        rounded, see :attr:`quantization_step_rad`); a filter pipeline no
+        Audace writer makes is named by its filters. ``None`` for DAT, TDMS
+        and SEG-Y, which are never compressed."""
+        return self._compression
+
+    @property
+    def quantization_step_rad(self) -> Optional[float]:
+        """``ZSTD_LOSSY_1E4`` only: the grid every phase sample was rounded
+        to, in radians (``2⁻¹³``), or ``None`` when the samples are exact
+        (any other file)."""
+        return self._quantization_step_rad
+
+    @property
+    def quantization_max_error_rad(self) -> Optional[float]:
+        """``ZSTD_LOSSY_1E4`` only: the largest difference, in radians,
+        between a stored phase sample and the acquired one (half the step,
+        ≤ 6.1·10⁻⁵ rad), or ``None`` when the samples are exact."""
+        return self._quantization_max_error_rad
 
     @property
     def flags(self) -> int:
@@ -678,19 +793,29 @@ class File:
 
     @property
     def is_mozart(self) -> Optional[bool]:
-        """Which demodulation pipeline ran, or ``None`` if none did.
+        """Whether the samples are the GPU Mozart software phase, or ``None``
+        when the question does not apply.
 
-        ``True`` = Mozart, ``False`` = Schubert, ``None`` on raw data. The
-        distinction is carried by the *absence* of the ``MOZART`` bit rather
-        than by a bit of its own, so on a raw capture "not Mozart" would read
-        as "Schubert" and name a pipeline that never executed. Treat ``None``
-        as "not applicable", never as a default.
+        * A file that carries a content type (:attr:`content_type` ≠ 0) is
+          answered by it alone: ``True`` for ``sw_mozart``, ``None`` for
+          ``raw`` (no demodulation ran) and for a content type this SDK does
+          not know, ``False`` for every other one.
+        * A capture written before the content type existed (``0``) keeps
+          the flag-based answer: ``None`` when the ``DEMODULATED`` bit is
+          clear, else whether the ``MOZART`` bit is set.
+
+        ``False`` only says "not Mozart" — it names no other pipeline (the
+        ``SCHUBERT`` flag is deprecated). Treat ``None`` as "not
+        applicable", never as a default.
         """
         return self._header.is_mozart
 
     @property
     def dtype(self) -> np.dtype:
-        """numpy dtype matching ``(sample_size, FLOAT)``."""
+        """numpy dtype :meth:`read_lines` returns: ``(sample_size, FLOAT)``,
+        signed integers except a single-column ``UNSIGNED`` file
+        (``uint16``: the ``magnitude/`` child of a split arctan/magnitude
+        stream) and 1-byte samples (``uint8``)."""
         return _dtype_for(self._header)
 
     @property
@@ -761,7 +886,9 @@ class File:
 
     @property
     def is_unsigned(self) -> _Flag:
-        """True if the odd lane of an INTERLEAVED pair is u16 (magnitude)."""
+        """True if the ``UNSIGNED`` bit is set: the odd lane of an
+        INTERLEAVED pair is u16 (magnitude), or, on a single column, every
+        sample is (read as ``uint16``)."""
         return _Flag(self._header.is_unsigned)
 
     @property
@@ -1062,10 +1189,11 @@ class File:
 
 
 def _dtype_for(h: Header) -> np.dtype:
-    """numpy dtype matching ``(sample_size, FLOAT)``."""
-    if h.is_float:
-        return np.dtype(f"float{h.sample_size * 8}")
-    return np.dtype(f"int{h.sample_size * 8}")
+    """numpy dtype the readers return for header ``h`` (see
+    :func:`invisensing._formats.wire_dtype`, the one rule)."""
+    from ._formats import wire_dtype
+
+    return wire_dtype(h)
 
 
 def _clamp_i64(v: int) -> int:

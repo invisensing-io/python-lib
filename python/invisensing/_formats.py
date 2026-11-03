@@ -39,6 +39,7 @@ from typing import Optional
 import numpy as np
 
 from ._core import (
+    CONTENT_TYPE_NAMES,
     DatReader,
     Header,
     FLAG_DEMODULATED,
@@ -54,6 +55,63 @@ from ._core import (
 #: read after ``close()``.
 _CLOSED_MSG = "operation on a closed file"
 
+#: ``content_type`` value of each tag this SDK knows (the inverse of
+#: ``_core.CONTENT_TYPE_NAMES``).
+_CONTENT_TYPE_BY_NAME = {name: value for value, name in CONTENT_TYPE_NAMES.items()}
+
+
+def wire_dtype(h: Header) -> np.dtype:
+    """The numpy dtype :meth:`read_lines` returns for a file of header ``h``
+    — the native DAT reader's rule, which every backend follows:
+
+    * ``FLOAT``: ``float32`` / ``float64`` (4 / 8 bytes);
+    * 1 byte: ``uint8``;
+    * a single column (not ``INTERLEAVED``) with ``UNSIGNED``: the unsigned
+      integer of ``sample_size`` (``uint16`` for the ``magnitude/`` child of
+      a split arctan/magnitude stream);
+    * otherwise the signed integer of ``sample_size`` (an INTERLEAVED pair
+      stays ``int16``: its UNSIGNED lane is reinterpreted by
+      :meth:`File.get_magnitude`).
+    """
+    size = h.sample_size
+    if h.is_float and size in (4, 8):
+        return np.dtype(f"float{size * 8}")
+    if size == 1:
+        return np.dtype("uint8")
+    if h.is_unsigned and not h.is_interleaved and not h.is_float:
+        return np.dtype(f"uint{size * 8}")
+    return np.dtype(f"int{size * 8}")
+
+
+def _as_wire_dtype(arr: np.ndarray, h: Header) -> np.ndarray:
+    """``arr`` with the dtype :func:`wire_dtype` names, when it holds the same
+    integers under the other signedness (an HDF5 written ``int16`` with
+    ``unsigned = 1`` before writers stored ``uint16``, a TDMS channel that is
+    always ``int16``): the bits are kept, reinterpreted. Any other array is
+    returned unchanged."""
+    want = wire_dtype(h)
+    have = arr.dtype
+    if (
+        have != want
+        and have.kind in "iu"
+        and want.kind in "iu"
+        and have.itemsize == want.itemsize
+    ):
+        return arr.view(want)
+    return arr
+
+
+def _content_type(number: Optional[int], name: Optional[str]) -> int:
+    """The ``content_type`` byte from a file's number and tag attributes:
+    the number when there is one (it is the canonical value), else the value
+    of a tag this SDK knows, else ``0`` (a file written before either
+    existed)."""
+    if number is not None and 0 <= number <= 0xFF:
+        return number
+    if name is not None:
+        return _CONTENT_TYPE_BY_NAME.get(name, 0)
+    return 0
+
 
 # ── DAT — native Rust ──────────────────────────────────────────────────────
 
@@ -67,6 +125,8 @@ class _DatBackend:
         # close() — the file is gone, the numbers describing it are not.
         self._header = self._inner.header
         self._num_lines = int(self._inner.num_lines)
+        # Bytes past the last whole line (a file cut short); `File` warns.
+        self.trailing_bytes = int(getattr(self._inner, "trailing_bytes", 0))
 
     def _require_open(self):
         inner = getattr(self, "_inner", None)
@@ -325,6 +385,20 @@ class _TimeAxis:
         return self.correction == CORRECTION_CARDCLOCK_V1 and bool(self.lines)
 
 
+def _hdf5_compression(filters: set, quantization_step_rad: Optional[float]) -> str:
+    """The FileWriter ``compression`` setting an HDF5 was written with, from
+    its dataset's filter pipeline: ``"NONE"`` (no filter), ``"ZSTD"`` (zstd,
+    filter 32015, lossless) or ``"ZSTD_LOSSY_1E4"`` (the same pipeline with
+    the phase rounded, said by ``quantization_step_rad``). A pipeline no
+    Audace writer makes is reported by its filter names (``"gzip+shuffle"``).
+    """
+    if _ZSTD_FILTER_ID in filters:
+        return "ZSTD_LOSSY_1E4" if quantization_step_rad is not None else "ZSTD"
+    if not filters:
+        return "NONE"
+    return "+".join(sorted(filters))
+
+
 def _read_time_axis(attrs) -> Optional[_TimeAxis]:
     """The file's time attributes, ``None`` for a file that has none
     (written before them, or converted from such a file)."""
@@ -376,6 +450,7 @@ class _Hdf5Backend:
         # Cached so the shape stays answerable once the handle is gone.
         self._num_lines = int(self._dataset.shape[0])
         self._cursor = 0
+        filters = _filter_ids(self._dataset)
 
         attrs = self._file.attrs
         # The card's time map, when the recorder stamped the file from it
@@ -406,8 +481,12 @@ class _Hdf5Backend:
             # 0 (Undefined) is what a pre-fix file honestly is. Without this,
             # the same capture reported a content type through the DAT backend
             # and `undefined` through the HDF5 one, for no reason a caller
-            # could see.
-            content_type=int(attrs.get("content_type", 0)),
+            # could see. The number is canonical; the tag beside it
+            # (`content_type_name`) stands in when the number is missing.
+            content_type=_content_type(
+                _opt_int_attr(attrs, "content_type"),
+                _str_attr(attrs, "content_type_name"),
+            ),
             # The card's trigger rational (since the real-frequency
             # recordings). Absent — 0, unknown — on older files and for an
             # external trigger; the File falls back on `trig_frequency`.
@@ -423,6 +502,17 @@ class _Hdf5Backend:
         self.trig_frequency_real_hz_attr = _positive_float_attr(
             attrs, "trig_frequency_real_hz"
         )
+        # The writer's tag of the content type: what names a value this SDK
+        # does not know (a newer producer).
+        self.content_type_name_attr = _str_attr(attrs, "content_type_name")
+        # ZSTD_LOSSY_1E4: every phase sample was rounded to a multiple of the
+        # step, at most the error away from what was acquired (Audace-Lib
+        # `write_hdf5_attrs`). Absent = the samples are exact.
+        self.quantization_step_rad = _positive_float_attr(attrs, "quantization_step_rad")
+        self.quantization_max_error_rad = _positive_float_attr(
+            attrs, "quantization_max_error_rad"
+        )
+        self.compression = _hdf5_compression(filters, self.quantization_step_rad)
 
     def _require_open(self):
         dataset = getattr(self, "_dataset", None)
@@ -454,11 +544,13 @@ class _Hdf5Backend:
         n = min(n, self.lines_left)
         out = np.asarray(dataset[self._cursor : self._cursor + n])
         self._cursor += n
-        # h5py returns the dataset dtype as-is, which already matches
-        # (sample_size, FLOAT) — the Audace HDF5 writer types it that
-        # way. We deliberately do not reinterpret here so callers see
-        # the same numbers HDF5 saved.
-        return out
+        # h5py returns the dataset dtype as-is, which matches
+        # (sample_size, FLOAT) — the Audace HDF5 writer types it that way.
+        # The one reinterpretation: a single-column UNSIGNED file (the
+        # `magnitude/` child of a split arctan/magnitude stream) is read as
+        # unsigned whether the writer stored `int16` + `unsigned = 1` (every
+        # file before u16 datasets) or `uint16` — the same bits either way.
+        return _as_wire_dtype(out, self._header)
 
     def rewind(self) -> None:
         self._require_open()
@@ -531,8 +623,13 @@ class _TdmsBackend:
             num_channels=int(props.get("num_channels", 1)),
             timestamp=str(props.get("timestamp", "")),
             trigger_delay=int(props.get("trigger_delay", 0)),
-            content_type=int(props.get("content_type", 0)),
+            content_type=_content_type(
+                _opt_int_attr(props, "content_type"),
+                _str_attr(props, "content_type_name"),
+            ),
         )
+        # The writer's tag, which names a value this SDK does not know.
+        self.content_type_name_attr = _str_attr(props, "content_type_name")
         self._line_size = line_size
         self._channel = self._find_channel()
         self._num_lines = int(len(self._channel)) // line_size
@@ -578,7 +675,11 @@ class _TdmsBackend:
         # memory we own — closing the file cannot invalidate it.
         flat = np.asarray(channel.read_data(offset, length))
         self._cursor += n
-        return flat[: n * self._line_size].reshape(n, self._line_size)
+        # The TDMS channel is `int16` for every 2-byte file: a single-column
+        # UNSIGNED one is reinterpreted as `uint16`, like the DAT reader.
+        return _as_wire_dtype(
+            flat[: n * self._line_size].reshape(n, self._line_size), self._header
+        )
 
     def rewind(self) -> None:
         self._require_open()
@@ -646,19 +747,26 @@ class _SegyBackend:
         # bytes per sample comes from segyio's format code. Enum member
         # names follow segyio's SEG-Y revision wording (SIGNED_*_BYTE).
         fmt_to_bytes = {
-            segyio.SegySampleFormat.SIGNED_CHAR_1_BYTE: 1,
-            segyio.SegySampleFormat.UNSIGNED_CHAR_1_BYTE: 1,
-            segyio.SegySampleFormat.SIGNED_SHORT_2_BYTE: 2,
-            segyio.SegySampleFormat.UNSIGNED_SHORT_2_BYTE: 2,
-            segyio.SegySampleFormat.SIGNED_INTEGER_4_BYTE: 4,
-            segyio.SegySampleFormat.UNSIGNED_INTEGER_4_BYTE: 4,
-            segyio.SegySampleFormat.SIGNED_INTEGER_8_BYTE: 8,
-            segyio.SegySampleFormat.UNSIGNED_INTEGER_8_BYTE: 8,
-            segyio.SegySampleFormat.IEEE_FLOAT_4_BYTE: 4,
-            segyio.SegySampleFormat.IEEE_FLOAT_8_BYTE: 8,
-            segyio.SegySampleFormat.IBM_FLOAT_4_BYTE: 4,
+            int(segyio.SegySampleFormat.SIGNED_CHAR_1_BYTE): 1,
+            int(segyio.SegySampleFormat.UNSIGNED_CHAR_1_BYTE): 1,
+            int(segyio.SegySampleFormat.SIGNED_SHORT_2_BYTE): 2,
+            int(segyio.SegySampleFormat.UNSIGNED_SHORT_2_BYTE): 2,
+            int(segyio.SegySampleFormat.SIGNED_INTEGER_4_BYTE): 4,
+            int(segyio.SegySampleFormat.UNSIGNED_INTEGER_4_BYTE): 4,
+            int(segyio.SegySampleFormat.SIGNED_INTEGER_8_BYTE): 8,
+            int(segyio.SegySampleFormat.UNSIGNED_INTEGER_8_BYTE): 8,
+            int(segyio.SegySampleFormat.IEEE_FLOAT_4_BYTE): 4,
+            int(segyio.SegySampleFormat.IEEE_FLOAT_8_BYTE): 8,
+            int(segyio.SegySampleFormat.IBM_FLOAT_4_BYTE): 4,
         }
-        sample_size = fmt_to_bytes.get(self._segy.format, 4)
+        # `SegyFile.format` is an object that converts to the numeric code
+        # (segyio 1.9); looking it up as-is never matched, and every
+        # integer SEG-Y was read as 4-byte samples.
+        try:
+            fmt_code = int(self._segy.format)
+        except (TypeError, ValueError):
+            fmt_code = None
+        sample_size = fmt_to_bytes.get(fmt_code, 4)
 
         # Sanity: when the textual lookup fails, fall back to the binary
         # header / segyio's geometry so we still return a usable Header.
@@ -721,7 +829,15 @@ class _SegyBackend:
         block = np.asarray(self._segy.trace.raw[self._cursor : self._cursor + n])
         self._cursor += n
         if not self._header.is_float and self._sample_size in (2, 4, 8):
-            block = block.astype(f"int{self._sample_size * 8}")
+            want = wire_dtype(self._header)
+            if want.kind == "u":
+                # Through int64 (exact for every 2- and 4-byte code), then
+                # modular: a u16 magnitude written with a signed format code
+                # (-25536.0) and one written unsigned (40000.0) both come
+                # back as 40000.
+                block = block.astype(np.int64).astype(want)
+            else:
+                block = block.astype(want)
         return np.ascontiguousarray(block)
 
     def rewind(self) -> None:

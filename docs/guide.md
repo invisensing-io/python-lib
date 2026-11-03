@@ -122,7 +122,11 @@ with File("acquisition.dat") as f:
     f.duration               # seconds (= num_lines / trig_frequency_real_hz)
     f.distance               # metres of fibre covered per pulse
     f.range                  # ADC voltage range (V)
-    f.timestamp              # producer-side timestamp string
+    f.timestamp              # start time as the format spells it
+    f.content_type_name      # what the samples are ("hw_phase", "sw_mozart"…)
+    f.card                   # card tag on a dual-card run, else None
+    f.compression            # HDF5: "NONE" / "ZSTD" / "ZSTD_LOSSY_1E4"
+    f.trailing_bytes         # DAT cut mid-line: bytes not read (0 normally)
     f.dtype                  # numpy dtype of the wire samples
     f.shape                  # (num_lines, line_size)
     f.spatial_shape          # (num_lines, positions_per_line)
@@ -176,7 +180,7 @@ reads it:
 |---|---|
 | `line_time_ns(i)` | on a file with `time_correction == "cardclock-v1"`: the **corrected** time of line `i` on the file's axis (`time_map_line` / `time_map_ns` / `time_map_period_fs`: from node `k` on, `ns[k] + ⌊(i − line[k]) · period_fs[k] / 10⁶⌋`), the very integer the acquisition gave it; else the count, as in 1.3.0 |
 | `line_time_ns(i, nominal=True)` | the count, as 1.3.0 computed it (from `timestamp_nominal_ns` when the file carries it) |
-| `times_ns(start=0, count=None)` | the same times as an `int64` numpy vector (native core, exact) |
+| `times_ns(start=0, count=None)` | the same times as an `int64` numpy vector (native core, exact), never past the file's last line; `MemoryError` if it cannot be allocated |
 | `time_correction` | `"cardclock-v1"`, `"none"` (timed by the count), or `None` (the file does not say: older files) |
 | `time_correction_state` | the least favourable state over the file (`"tracking"`, `"prior"`, `"slewing"`, `"suspect"`, `"provisional"`…) |
 | `time_uncertainty_ns` | estimated uncertainty (1 σ) of the corrected **time** |
@@ -185,9 +189,11 @@ reads it:
 
 `timestamp_ns` (and `header.acquisition_ns`) of a corrected HDF5 is the
 corrected time of its first line; `timestamp_nominal_ns` is the count. A
-DAT, SEG-Y or TDMS keeps its format: its start time is the corrected one
-when `f.header.time_corrected` is `True` (bit `TIME_FLAG_CORRECTED` of
-header bytes 100..104), and lines count from there.
+DAT keeps its format: its start time is the corrected one when
+`f.header.time_corrected` is `True` (bit `TIME_FLAG_CORRECTED` of header
+bytes 100..104), and lines count from there. TDMS and SEG-Y carry neither
+an absolute time nor the time flags (`header.acquisition_ns` is `0`): their
+lines are timed from the start of the file.
 
 Keep `trig_frequency_real_hz` as the sampling rate along time (spectra,
 filters, Nyquist): the correction moves the time *labels*, not the samples.
