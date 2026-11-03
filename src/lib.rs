@@ -362,11 +362,13 @@ impl Header {
     }
 
     /// The content type a reader applies: the header's, except value 5 with
-    /// 4-byte samples in a header written before v1 — the f32 magnitude the
-    /// demodulation wrote under 5 then, which is 16 (Audace-Lib
-    /// `header::normalized_content_type`).
+    /// 4-byte samples — the f32 magnitude an older demodulation wrote under
+    /// 5, which is 16 (Audace-Lib `header::normalized_content_type`) —
+    /// whatever `format_version` says: an older demodulation behind a v1
+    /// acquisition card relays the card's v1 bytes, and no v1 producer
+    /// writes 5 with 4-byte samples (5 is `u16`).
     fn normalized_ct(&self) -> u8 {
-        if self.format_version == 0 && self.content_type == 5 && self.sample_size == 4 {
+        if self.content_type == 5 && self.sample_size == 4 {
             16
         } else {
             self.content_type
@@ -635,9 +637,9 @@ impl Header {
     }
 
     /// The content type a reader applies: `content_type`, except value 5
-    /// with 4-byte samples in a header written before data format v1 (the
-    /// f32 magnitude the demodulation labelled 5 then), which is 16
-    /// (`hw_amplitude_f32`).
+    /// with 4-byte samples (the f32 magnitude an older demodulation
+    /// labelled 5), which is 16 (`hw_amplitude_f32`), whatever
+    /// `format_version` says.
     #[getter]
     fn normalized_content_type(&self) -> u8 {
         self.normalized_ct()

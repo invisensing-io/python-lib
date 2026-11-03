@@ -436,15 +436,23 @@ def test_a_v1_file_is_described_by_its_content_type_alone(
         assert f.is_ac
 
 
-def test_a_v0_f32_hw_amplitude_is_the_f32_magnitude():
-    """Before v1 the demodulation labelled its f32 magnitude 5: read as 16."""
-    h = _header(content_type=5, sample_size=4, flags=FLAG_DEMODULATED | FLAG_FLOAT)
+@pytest.mark.parametrize("format_version", [0, 1])
+@pytest.mark.parametrize("flags", [FLAG_DEMODULATED | FLAG_FLOAT, 0])
+def test_an_f32_hw_amplitude_is_the_f32_magnitude(tmp_path, format_version, flags):
+    """An older demodulation labelled its f32 magnitude 5: read as 16, in a
+    header of either version — behind a v1 acquisition card it relays the
+    card's ``format_version`` 1 (Audace-Lib reads it the same way)."""
+    h = _header(content_type=5, sample_size=4, flags=flags, format_version=format_version)
     assert h.normalized_content_type == 16
     assert h.sample_encoding == (4, True, False)
     assert not h.sample_size_contradicts_content_type
     assert Mode.from_header(h) is Mode.AMPLITUDE
-    v1 = _header(content_type=5, sample_size=4, format_version=1)
-    assert v1.normalized_content_type == 5 and v1.sample_size_contradicts_content_type
+    path = tmp_path / "amplitude.dat"
+    values = np.array([[0.5, 40_000.25, 3.0, 65_535.5]], dtype=np.float32)
+    path.write_bytes(build_header_bytes(h) + values.tobytes())
+    with File(path) as f:
+        assert f.mode is Mode.AMPLITUDE and f.dtype == np.float32
+        np.testing.assert_array_equal(f.get_amplitude(), values)
 
 
 # ── The card code (bytes 65..81, every run since data format v1) ──────────

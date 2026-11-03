@@ -1686,8 +1686,8 @@ def _file_header(h: Header, dtype: np.dtype, line_size: int, lines: int) -> Head
 
     * a header whose content type is a single-column value of the
       registry becomes a **data format v1** header: ``format_version`` 1,
-      the content type (a pre-v1 ``hw_amplitude`` with 4-byte samples is
-      ``hw_amplitude_f32``), the file flags (AC and HIZ; FLOAT and UNSIGNED
+      the content type (an ``hw_amplitude`` with 4-byte samples, an older
+      demodulation's, is ``hw_amplitude_f32``), the file flags (AC and HIZ; FLOAT and UNSIGNED
       too for ``sw_custom``, which they type), the steps kept or derived,
       the card code, no stream-only time fields, and ``duration_s`` of the
       lines written. ``dtype`` must be the content type's sample type;
