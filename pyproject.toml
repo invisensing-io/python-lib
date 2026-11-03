@@ -94,17 +94,19 @@ module-name   = "invisensing._core"
 features      = ["pyo3/extension-module"]
 # Strip debug symbols from the released wheel — keeps the .so under a few MB.
 strip         = true
-# Files that should NOT end up in the source distribution. The test
-# fixture is 18 MB of synthetic DAS samples — fine to keep in the git
-# repo (legacy round-trip test uses it), pointless inside the .tar.gz
-# that goes to PyPI (users installing don't run our internal tests).
+# Files that should NOT end up in the source distribution. `**`, not `*`:
+# a single `*` stops at the first directory level, and `.github/*` let
+# `.github/workflows/*.yml` through. The tests ship with the small fixtures
+# they read (`tests/assets/*.json`, `*.txt`), so `pytest` runs from the
+# unpacked sdist; the one fixture left out is the 18 MB synthetic capture of
+# the legacy round trip (`tests/test_File.py` skips without it). Cargo.lock
+# ships: the sdist builds with the dependency versions CI tested.
 exclude       = [
-    "tests/output/*",
-    "tests/assets/*",
-    "target/*",
-    "Cargo.lock",
-    "Docs/*",
-    ".github/*",
+    "tests/output/**",
+    "tests/assets/demodulated.dat",
+    "target/**",
+    "Docs/**",
+    ".github/**",
     "Doxyfile",
     "PUBLISHING.md",
 ]

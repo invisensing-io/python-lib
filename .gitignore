@@ -10,10 +10,10 @@ __pycache__/
 .coverage
 htmlcov/
 
-# Rust build artefacts (maturin / cargo)
+# Rust build artefacts (maturin / cargo). Cargo.lock is tracked: the
+# extension is an application-like artefact (wheels, sdist), built with the
+# dependency versions that were tested.
 target/
-*.lock
-Cargo.lock
 
 # Compiled native extension copied into the package by `maturin develop`
 python/invisensing/*.so
