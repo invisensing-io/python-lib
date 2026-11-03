@@ -1642,6 +1642,13 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("CONTENT_TYPES", content_types(m.py())?)?;
     m.add("FORMAT_VERSION", FORMAT_VERSION)?;
     m.add("CARD_CODES", content::CARD_CODES.to_vec())?;
+    // `[("fnv1a64:<hex>", code)]`: the digests the former card variant tags
+    // are recognised by, written as the registry copy writes them.
+    let digests: Vec<(String, &str)> = content::LEGACY_TAG_DIGESTS
+        .iter()
+        .map(|(d, code)| (format!("fnv1a64:{d:016x}"), *code))
+        .collect();
+    m.add("LEGACY_CARD_DIGESTS", digests)?;
     m.add_function(wrap_pyfunction!(card_code, m)?)?;
     let layout = PyList::empty(m.py());
     for (name, offset, size, ty) in HEADER_LAYOUT {

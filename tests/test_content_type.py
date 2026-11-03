@@ -5,16 +5,22 @@ of the acquisition card).
 The content type is the reference for every file that carries one; a capture
 written before the byte existed (``content_type == 0``, ``"undefined"``)
 keeps the flag-based reading it always had. The SDK's registry must be the
-producer's: ``tests/assets/content_types_v1.json`` is a byte-identical copy
-of the machine-readable registry the acquisition publishes, pinned by its
-SHA-256 (the same pin sits in the producer's and the console's tests, so
-changing one copy fails the others until all are updated). The copy is kept
-out of the source distribution; the tests that need it skip without it.
+producer's: ``tests/assets/content_types_v1.json`` is derived from the
+machine-readable registry the acquisition publishes (Audace-Lib
+``tests/fixtures/content_types_v1.json``) by
+``tests/assets/derive_content_types_v1.py`` — the former card variant tags
+replaced by their FNV-1a digests and flag bit 0x020 named ``RESERVED``, so
+this package never spells a card model — and pinned by its own SHA-256 and
+by the upstream SHA-256 it was derived from (the producer's and the
+console's tests pin that one: changing the upstream file fails here until
+the copy is derived again). With Audace-Lib checked out beside python-lib,
+the derivation is replayed and compared byte for byte.
 """
 
 from __future__ import annotations
 
 import hashlib
+import importlib.util
 import json
 import math
 import warnings
@@ -48,6 +54,7 @@ from invisensing._core import (
     CONTENT_TYPE_NAMES,
     CONTENT_TYPES,
     HEADER_LAYOUT,
+    LEGACY_CARD_DIGESTS,
     build_header_bytes,
     card_code,
 )
@@ -62,22 +69,70 @@ def _header(**kw) -> Header:
 # ── The registry, against the producer's ───────────────────────────────────
 
 #: The producer's registry, revision 2 (content types 0..28). To follow a
-#: new revision: copy the producer's `tests/fixtures/content_types_v1.json`
-#: here byte for byte, put its SHA-256 below, and add the new rows to
-#: `src/content.rs`.
-REGISTRY_FIXTURE = Path(__file__).resolve().parent / "assets" / "content_types_v1.json"
-REGISTRY_SHA256 = "f349d176e376bb2ee0e16f1a9eae9420bafcdd3cbefbf092afe081ebb78db074"
+#: new revision: `python tests/assets/derive_content_types_v1.py
+#: ../Audace-Lib/tests/fixtures/content_types_v1.json`, put the two SHA-256
+#: it prints below, and add the new rows to `src/content.rs`.
+ASSETS = Path(__file__).resolve().parent / "assets"
+REGISTRY_FIXTURE = ASSETS / "content_types_v1.json"
+#: SHA-256 of the derived copy beside these tests.
+REGISTRY_SHA256 = "3ba73d483927bf40556df24f43cdd34efa3cf94c4af561d8aa410b46f1a865ba"
+#: SHA-256 of the producer's file it was derived from (Audace-Lib 3b281ac,
+#: `tests/fixtures/content_types_v1.json`, revision 2).
+UPSTREAM_REGISTRY_SHA256 = "f349d176e376bb2ee0e16f1a9eae9420bafcdd3cbefbf092afe081ebb78db074"
+#: The producer's file, when Audace-Lib is checked out beside python-lib.
+UPSTREAM_REGISTRY = (
+    Path(__file__).resolve().parent.parent.parent
+    / "Audace-Lib" / "tests" / "fixtures" / "content_types_v1.json"
+)
+
+
+def _derivation():
+    spec = importlib.util.spec_from_file_location(
+        "derive_content_types_v1", ASSETS / "derive_content_types_v1.py"
+    )
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 @pytest.fixture(scope="module")
 def registry() -> dict:
-    if not REGISTRY_FIXTURE.exists():
-        pytest.skip("tests/assets/content_types_v1.json not present (installing from sdist)")
     return json.loads(REGISTRY_FIXTURE.read_text())
 
 
-def test_the_registry_copy_is_the_pinned_one(registry):
+@pytest.fixture(scope="module")
+def upstream_registry() -> dict:
+    """The producer's own file — the only place the former card variant tags
+    are spelled; never copied into this package."""
+    if not UPSTREAM_REGISTRY.exists():
+        pytest.skip("Audace-Lib is not checked out next to python-lib")
+    return json.loads(UPSTREAM_REGISTRY.read_text())
+
+
+def test_the_registry_copy_is_the_pinned_one():
     assert hashlib.sha256(REGISTRY_FIXTURE.read_bytes()).hexdigest() == REGISTRY_SHA256
+
+
+@pytest.mark.skipif(
+    not UPSTREAM_REGISTRY.exists(),
+    reason="Audace-Lib is not checked out next to python-lib",
+)
+def test_the_registry_copy_is_derived_from_the_producer_s():
+    """Replays the derivation on the producer's file: a new upstream revision
+    fails here until the copy is derived again and both pins move."""
+    upstream = UPSTREAM_REGISTRY.read_bytes()
+    assert hashlib.sha256(upstream).hexdigest() == UPSTREAM_REGISTRY_SHA256, (
+        "the producer's registry changed: run tests/assets/derive_content_types_v1.py "
+        "and update both SHA-256 pins"
+    )
+    assert _derivation().derive(upstream) == REGISTRY_FIXTURE.read_bytes()
+
+
+def test_the_registry_copy_spells_no_card_model():
+    text = REGISTRY_FIXTURE.read_text()
+    for c in json.loads(text)["cards"]:
+        for tag in c["legacy_tags"]:
+            assert tag.startswith("fnv1a64:") and len(tag) == len("fnv1a64:") + 16
 
 
 #: Columns that are the producer's prose or its own identifiers.
@@ -125,7 +180,12 @@ def test_the_header_layout_is_the_producer_s(registry):
 
 
 def test_the_flag_bits_are_the_producer_s(registry):
-    """Same bits; the 0x020 bit is named neutrally here (FLAG_RESERVED)."""
+    """Same bits and names; the 0x020 bit is named neutrally in the copy, as
+    here (FLAG_RESERVED)."""
+    import invisensing
+
+    names = [f["name"] for f in registry["flags"]]
+    assert [getattr(invisensing, f"FLAG_{n}") for n in names] == [f["bit"] for f in registry["flags"]]
     ours = [FLAG_DEMODULATED, FLAG_FLOAT, FLAG_AC, FLAG_HIZ, FLAG_SCHUBERT,
             FLAG_RESERVED, FLAG_MOZART, FLAG_PHASE, FLAG_INTERLEAVED, FLAG_UNSIGNED]
     assert [f["bit"] for f in registry["flags"]] == ours
@@ -163,10 +223,20 @@ def test_the_card_codes_are_the_producer_s(registry):
     assert list(CARD_CODES) == [c["code"] for c in registry["cards"]]
     for c in registry["cards"]:
         assert card_code(c["code"]) == c["code"]
-        # A tag written by a two-card run before data format v1 reads as its
-        # code (the tags are never spelled in this SDK's sources).
+    # The former variant tags are recognised by the digests the copy carries.
+    assert sorted(LEGACY_CARD_DIGESTS) == sorted(
+        (digest, c["code"]) for c in registry["cards"] for digest in c["legacy_tags"]
+    )
+
+
+def test_a_tag_written_before_v1_maps_to_its_code(upstream_registry):
+    """A tag written by a two-card run before data format v1 reads as its
+    code (read from the producer's file; never spelled in this package)."""
+    derive = _derivation()
+    for c in upstream_registry["cards"]:
         for tag in c["legacy_tags"]:
             assert card_code(tag) == c["code"]
+            assert (derive.tag_digest(tag), c["code"]) in LEGACY_CARD_DIGESTS
 
 
 @pytest.mark.parametrize("value", [29, 42, 254, 255])
@@ -397,8 +467,8 @@ def test_the_card_code_is_read(tmp_path, code):
         assert f"card='{code}'" in repr(f.header)
 
 
-def test_a_tag_written_before_v1_reads_as_its_code(registry, tmp_path):
-    for c in registry["cards"]:
+def test_a_tag_written_before_v1_reads_as_its_code(upstream_registry, tmp_path):
+    for c in upstream_registry["cards"]:
         for tag in c["legacy_tags"]:
             path = tmp_path / f"{c['code']}.dat"
             path.write_bytes(_raw_header(tag.encode()) + np.zeros((1, 4), np.int16).tobytes())
@@ -421,12 +491,15 @@ def test_anything_else_in_the_slot_is_no_card(slot):
     assert parse_header(_raw_header(slot)).card is None
 
 
-def test_the_card_code_round_trips_and_older_headers_keep_their_repr(registry):
+def test_a_tag_written_before_v1_given_to_the_constructor_is_its_code(upstream_registry):
+    for c in upstream_registry["cards"]:
+        for tag in c["legacy_tags"]:
+            assert _header(card=tag).card == c["code"]
+
+
+def test_the_card_code_round_trips_and_older_headers_keep_their_repr():
     h = _header(card="p21")
     assert parse_header(build_header_bytes(h)).card == "p21"
-    # A tag written before v1 given to the constructor is stored as its code.
-    tag = next(t for c in registry["cards"] for t in c["legacy_tags"])
-    assert _header(card=tag).card in CARD_CODES
     assert _header().card is None
     assert _header(card="").card is None
     assert "card" not in repr(_header())
