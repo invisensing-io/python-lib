@@ -403,8 +403,9 @@ in their header (all formats; `0` / absent on older files):
   `f.spatial_step_m` and `f.temporal_step_s` (DAT bytes 104..120; HDF5 /
   TDMS attributes in f64; SEG-Y text lines);
 - `f.card`: the code of the card that recorded it — `p18`, `p21`, `s125`
-  or `s500` — on every file (before v1 only the DAT files of a two-card run
-  carried it, read as the same codes);
+  or `s500` — on every file (before v1 only DAT headers carried it, as a
+  tag read as the same code: every run's from 2026-07-15 to 2026-10-13,
+  then a two-card run's);
 - new HDF5 files are named `.h5`; `.hdf5` is read as always;
 - SEG-Y textual headers are read from the file's bytes, in ASCII (what the
   acquisition writes) or EBCDIC;

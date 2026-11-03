@@ -68,17 +68,17 @@ def _header(**kw) -> Header:
 
 # ── The registry, against the producer's ───────────────────────────────────
 
-#: The producer's registry, revision 2 (content types 0..28). To follow a
+#: The producer's registry, revision 3 (content types 0..28). To follow a
 #: new revision: `python tests/assets/derive_content_types_v1.py
 #: ../Audace-Lib/tests/fixtures/content_types_v1.json`, put the two SHA-256
 #: it prints below, and add the new rows to `src/content.rs`.
 ASSETS = Path(__file__).resolve().parent / "assets"
 REGISTRY_FIXTURE = ASSETS / "content_types_v1.json"
 #: SHA-256 of the derived copy beside these tests.
-REGISTRY_SHA256 = "3ba73d483927bf40556df24f43cdd34efa3cf94c4af561d8aa410b46f1a865ba"
-#: SHA-256 of the producer's file it was derived from (Audace-Lib 3b281ac,
-#: `tests/fixtures/content_types_v1.json`, revision 2).
-UPSTREAM_REGISTRY_SHA256 = "f349d176e376bb2ee0e16f1a9eae9420bafcdd3cbefbf092afe081ebb78db074"
+REGISTRY_SHA256 = "ab130979168747191399281e2e1c8da66fd1d335b072c892ee3ca92f1cc5f09e"
+#: SHA-256 of the producer's file it was derived from (Audace-Lib 1e1b23e,
+#: `tests/fixtures/content_types_v1.json`, revision 3).
+UPSTREAM_REGISTRY_SHA256 = "add41b45efe6df4264a34d80298917d64c13eaf81febb207cd5a4f35e4d9f121"
 #: The producer's file, when Audace-Lib is checked out beside python-lib.
 UPSTREAM_REGISTRY = (
     Path(__file__).resolve().parent.parent.parent
@@ -230,8 +230,9 @@ def test_the_card_codes_are_the_producer_s(registry):
 
 
 def test_a_tag_written_before_v1_maps_to_its_code(upstream_registry):
-    """A tag written by a two-card run before data format v1 reads as its
-    code (read from the producer's file; never spelled in this package)."""
+    """A tag written before data format v1 (every run from 2026-07-15 to
+    2026-10-13, two-card runs afterwards) reads as its code (read from the
+    producer's file; never spelled in this package)."""
     derive = _derivation()
     for c in upstream_registry["cards"]:
         for tag in c["legacy_tags"]:

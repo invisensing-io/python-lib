@@ -829,7 +829,8 @@ class File:
         ``"p18"``, ``"p21"``, ``"s125"`` or ``"s500"`` — or ``None`` when the
         file does not say. Every file of data format v1 carries it (DAT
         header, HDF5 / TDMS ``card``, SEG-Y ``CARD:`` line); before v1 only
-        the DAT files of a two-card run did."""
+        DAT headers did, as a tag read as the same code: every run's from
+        2026-07-15 to 2026-10-13, then a two-card run's."""
         return self._header.card
 
     @property

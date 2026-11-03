@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "revision": 2,
+ "revision": 3,
  "format_version": 1,
  "spec": "Audace-Lib/docs/DATA_FORMAT.md",
  "light_speed_in_fiber_m_s": 200000000,
@@ -215,11 +215,15 @@
   },
   {
    "code": "s125",
-   "legacy_tags": []
+   "legacy_tags": [
+    "fnv1a64:496b14c6777bf398"
+   ]
   },
   {
    "code": "s500",
-   "legacy_tags": []
+   "legacy_tags": [
+    "fnv1a64:ed9dd75fe25db76b"
+   ]
   }
  ],
  "unrecognized_marker": 255,
@@ -334,7 +338,7 @@
    "members": null,
    "split_children": null,
    "status": "current",
-   "notes": "in a format_version 0 file with sample_size 4: f32, i.e. value 16"
+   "notes": "with sample_size 4 (an older Demodulation's output, whatever format_version says): f32, i.e. value 16"
   },
   {
    "value": 6,

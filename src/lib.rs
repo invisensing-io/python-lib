@@ -83,8 +83,9 @@ mod offsets {
     pub const CONTENT_TYPE: usize = 64; // u8 (carved out of the old reserved region)
     /// The code of the card that produced the data (`p18`, `p21`, `s125`,
     /// `s500`), ASCII, NUL-padded, 16 bytes (65..81): stamped on every run
-    /// since data format v1. Before v1 the slot held a variant tag on
-    /// two-card runs only, all zero otherwise (see [`crate::content::card_code`]).
+    /// since data format v1. Before v1 the slot held a variant tag on every
+    /// run from 2026-07-15 to 2026-10-13, then on two-card runs only, all
+    /// zero otherwise (see [`crate::content::card_code`]).
     pub const CARD_TAG: usize = 65;
     pub const CARD_TAG_LEN: usize = 16;
     /// u32 LE metres of fibre, carved out of the reserved region past the
@@ -286,8 +287,9 @@ pub struct Header {
     /// `"s125"` or `"s500"` — or `None` when the file does not say (an older
     /// single-card capture, a file converted without it). Stamped on every
     /// run since data format v1 (DAT bytes 65..81, HDF5 / TDMS `card`, SEG-Y
-    /// `CARD:` line); the tag a two-card run wrote there before v1 reads as
-    /// its code.
+    /// `CARD:` line); the tag a run wrote there before v1 (every run from
+    /// 2026-07-15 to 2026-10-13, two-card runs only afterwards) reads as its
+    /// code.
     pub card: Option<String>,
     /// Precise acquisition time in i64 nanoseconds (DataHeader timestamp bytes
     /// [0..8]). `0` when the file uses the legacy ASCII timestamp string.

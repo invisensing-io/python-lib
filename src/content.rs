@@ -274,14 +274,20 @@ const fn fnv1a64(bytes: &[u8]) -> u64 {
     h
 }
 
-/// Before data format v1 the slot held a card variant tag, written only by
-/// two-card runs; two such tags exist, one per code below. They are
-/// recognised by their 64-bit FNV-1a digest rather than spelled out, so
-/// that this public source names the cards by their codes only (the
-/// registry copy `tests/assets/content_types_v1.json` carries the same
-/// digests in `cards[].legacy_tags`, and `tests/test_content_type.py`
-/// checks both against each other and against the producer's file).
-pub const LEGACY_TAG_DIGESTS: [(u64, &str); 2] = [(0x39ef_1277_a031_18a8, "p18"), (0x39f9_1b77_a039_7c78, "p21")];
+/// Before data format v1 the slot could hold a card variant tag: on every
+/// run, one card or two, from 2026-07-15 to 2026-10-13, then on two-card
+/// runs only. Four such tags exist, one per code below. They are recognised
+/// by their 64-bit FNV-1a digest rather than spelled out, so that this
+/// public source names the cards by their codes only (the registry copy
+/// `tests/assets/content_types_v1.json` carries the same digests in
+/// `cards[].legacy_tags`, and `tests/test_content_type.py` checks both
+/// against each other and against the producer's file).
+pub const LEGACY_TAG_DIGESTS: [(u64, &str); 4] = [
+    (0x39ef_1277_a031_18a8, "p18"),
+    (0x39f9_1b77_a039_7c78, "p21"),
+    (0x496b_14c6_777b_f398, "s125"),
+    (0xed9d_d75f_e25d_b76b, "s500"),
+];
 
 /// The card code a slot or attribute value stands for: a code is taken as
 /// is, a tag written before v1 is mapped to its code, anything else
