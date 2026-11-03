@@ -20,7 +20,7 @@ with File("capture.dat") as f:
     print(f)
     # File('capture.dat', mode=iq, shape=(10000, 974),
     #      sample_rate=250000000 Hz, trig_frequency=1000 Hz,
-    #      duration=10.00s, distance=507.21m)
+    #      duration=10.00s, distance=194.80m)
 
     print(f"Mode:               {f.mode.value}")
     print(f"Pulses:             {f.num_lines:,}")
@@ -29,7 +29,7 @@ with File("capture.dat") as f:
     print(f"Trigger rate:       {f.trig_frequency} Hz requested, "
           f"{f.trig_frequency_real_hz:.4f} Hz real")
     print(f"Duration:           {f.duration:.2f} s")
-    print(f"Round-trip distance:{f.distance:.1f} m of fibre")
+    print(f"Fibre length:       {f.distance:.1f} m")
     print(f"Range:              ±{f.range:.2f} V")
     print(f"Timestamp:          {f.timestamp}")
 ```

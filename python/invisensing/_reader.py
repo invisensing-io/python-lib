@@ -81,10 +81,12 @@ _I64_MIN = -(2**63)
 _I64_MAX = 2**63 - 1
 _FS_PER_NS = 1_000_000
 
-# Speed-of-light in single-mode silica fibre at 1550 nm (n ≈ 1.45).
-# Same value the Audace producer (Cardcontrol) uses for its own
-# distance / spatial-resolution computations.
-_LIGHT_SPEED_IN_FIBER = 206_856_796  # m/s
+# Speed of light in the fibre (m/s): 2·10⁸, the one value used everywhere in
+# Audace. It is the legacy C++ CardControl's ``LIGHT_SPEED_IN_FIBER``, and the
+# producer (Cardcontrol) still turns the operator's metres into the card's
+# sample count with it, so a file's distances only come back right with the
+# same value.
+_LIGHT_SPEED_IN_FIBER = 200_000_000  # m/s
 
 
 # ── Mode enum ───────────────────────────────────────────────────────────────
@@ -725,7 +727,13 @@ class File:
 
     @property
     def distance(self) -> float:
-        """Round-trip distance (m) the pulse covers in the fibre."""
+        """Length of fibre (m) one line covers, measured one way along the fibre.
+
+        ``positions_per_line · c / (2 · sample_rate)`` with ``c = 2·10⁸ m/s``:
+        a sample spans ``1 / sample_rate`` of the pulse's round trip, hence
+        the 2 — the result is the distance along the fibre, not the path the
+        light travels.
+        """
         positions = max(self.positions_per_line, 1)
         return (_LIGHT_SPEED_IN_FIBER * positions) / (2 * max(self.sample_rate, 1))
 

@@ -36,7 +36,8 @@ def test_open_file():
     assert file.is_demodulated()
     assert not file.is_acquisition_hiz()
     assert file.get_duration() == 10
-    assert 490 < file.get_distance() < 510
+    # 487 positions at 100 MHz, at 2·10⁸ m/s: exactly 487 m of fibre.
+    assert file.get_distance() == 487.0
     assert file.get_num_lines() == 10000
     assert file.get_range() == 2
 
