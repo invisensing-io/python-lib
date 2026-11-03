@@ -8,12 +8,11 @@ Usage::
 
     from invisensing import File, Mode
 
-    with File("acquisition.dat") as f:
-        if f.mode is Mode.IQ:
-            i = f.get_i()
-            q = f.get_q()
-        elif f.mode is Mode.PHASE:
-            phase = f.get_phase()
+    with File("phase/2026-11-03_10-00-00.h5") as f:
+        if f.mode is Mode.PHASE:
+            phase = f.get_phase()          # float32, rad
+        elif f.mode is Mode.AMPLITUDE:
+            amplitude = f.get_amplitude()
         else:
             samples = f.read_lines(1000)
 
@@ -34,6 +33,8 @@ from typing import Any, Iterator, Optional, Union
 import numpy as np
 
 from . import _core
+from . import _formats
+from . import content as _content
 from ._core import (
     DatReader,
     Header,
@@ -44,11 +45,12 @@ from ._core import (
     FLAG_AC,
     FLAG_HIZ,
     FLAG_SCHUBERT,
-    FLAG_SPECTRUM,
+    FLAG_RESERVED,
     FLAG_MOZART,
     FLAG_PHASE,
     FLAG_INTERLEAVED,
     FLAG_UNSIGNED,
+    FORMAT_VERSION,
     HEADER_SIZE,
     TIME_FLAG_MAP_V1,
     TIME_FLAG_CORRECTED,
@@ -66,11 +68,12 @@ __all__ = [
     "FLAG_AC",
     "FLAG_HIZ",
     "FLAG_SCHUBERT",
-    "FLAG_SPECTRUM",
+    "FLAG_RESERVED",
     "FLAG_MOZART",
     "FLAG_PHASE",
     "FLAG_INTERLEAVED",
     "FLAG_UNSIGNED",
+    "FORMAT_VERSION",
     "HEADER_SIZE",
     "TIME_FLAG_MAP_V1",
     "TIME_FLAG_CORRECTED",
@@ -94,38 +97,78 @@ _LIGHT_SPEED_IN_FIBER = 200_000_000  # m/s
 
 class Mode(Enum):
     """
-    High-level acquisition mode of a file. Derived from the header
-    flags so the user can dispatch with one ``match`` statement instead
-    of bit-twiddling::
+    What a file holds, and therefore which extractor reads it. Derived from
+    the file's **content type** (:attr:`File.content_type`) — on a file
+    written before the content type existed (``content_type == 0``), from
+    its header flags, exactly as before — so a script can dispatch with one
+    ``match`` statement instead of bit-twiddling::
 
         match file.mode:
-            case Mode.RAW:               samples = file.read_lines(n)
-            case Mode.IQ:                i, q    = file.get_i(), file.get_q()
-            case Mode.ARCTAN_MAGNITUDE:  a, m    = file.get_arctan(), file.get_magnitude()
-            case Mode.PHASE:             phase   = file.get_phase()
+            case Mode.RAW:              samples = file.read_lines(n)
+            case Mode.PHASE:            phase   = file.get_phase()
+            case Mode.AMPLITUDE:        amp     = file.get_amplitude()
+            case Mode.ARCTAN:           rad     = file.get_arctan_radians()
+            case Mode.I | Mode.Q:       column  = file.read_lines(n)
+            case Mode.IQ:               i, q    = file.get_i(), file.get_q()
+            case Mode.ARCTAN_MAGNITUDE: a, m    = file.get_arctan(), file.get_magnitude()
+            case Mode.PHASE_AMPLITUDE:  p, m    = file.get_phase(), file.get_amplitude()
+
+    Since data format v1 every recording holds one quantity per file: an
+    interleaved stream is split into two files (``phase/`` and
+    ``amplitude/``, ``arctan/`` and ``magnitude/``, ``i_component/`` and
+    ``q_component/``; see :attr:`File.sibling_path`). The paired modes
+    (``IQ``, ``ARCTAN_MAGNITUDE``, ``PHASE_AMPLITUDE``) are the files
+    written before, which may still hold both.
     """
 
-    #: Plain ADC samples — no on-board DSP, no INTERLEAVED. Read with
-    #: :meth:`File.read_lines`. Also every other single column the modes
-    #: below do not name (a split child: arctan, I, Q, the ``uint16``
-    #: magnitude…): :attr:`File.content_type_name` says what it is.
+    #: Raw ADC samples (``int16``, content type ``raw``). On a file written
+    #: before the content type existed, every single column the flags do
+    #: not name otherwise. Read with :meth:`File.read_lines`.
     RAW = "raw"
-    #: PCIe7821 IQ demodulation — INTERLEAVED ``[I, Q, I, Q, …]``,
-    #: signed ``int16``. Use :meth:`File.get_i` / :meth:`File.get_q` /
-    #: :meth:`File.get_iq`.
+    #: I/Q pairs ``[I, Q, I, Q, …]``, signed ``int16`` (a file written
+    #: before data format v1). Use :meth:`File.get_i` / :meth:`File.get_q`
+    #: / :meth:`File.get_iq`.
     IQ = "iq"
-    #: PCIe7821 Arctan/Magnitude — INTERLEAVED + UNSIGNED:
-    #: ``[arctan(Q/I) (i16), √(I²+Q²) (u16), …]``. Use
-    #: :meth:`File.get_arctan` / :meth:`File.get_magnitude`.
+    #: Arctan/magnitude pairs ``[arctan(Q/I) (i16), √(I²+Q²) (u16), …]`` (a
+    #: file written before data format v1). Use :meth:`File.get_arctan` /
+    #: :meth:`File.get_magnitude`.
     ARCTAN_MAGNITUDE = "arctan_magnitude"
-    #: PCIe7821 Phase — single ``float32`` radians per spatial position,
-    #: post DSP (fading suppression + spatial differential + detrend).
-    #: Use :meth:`File.get_phase` (or :meth:`File.read_lines`).
+    #: One phase per position, ``float32`` radians — on-board or software
+    #: demodulation (:attr:`File.content_type_name` names the chain). Use
+    #: :meth:`File.get_phase` (or :meth:`File.read_lines`).
     PHASE = "phase"
+    #: Phase/amplitude pairs ``[phase, amplitude, …]``, ``float32`` (a
+    #: demodulation that kept the amplitude, in a file written before data
+    #: format v1). Use :meth:`File.get_phase` / :meth:`File.get_amplitude`.
+    PHASE_AMPLITUDE = "phase_amplitude"
+    #: The card's wrapped ``arctan(Q/I)``, ``int16`` with ``32767 ↔ +π``
+    #: (the ``arctan/`` file of a split arctan/magnitude recording). Use
+    #: :meth:`File.get_arctan` / :meth:`File.get_arctan_radians`.
+    ARCTAN = "arctan"
+    #: An amplitude (magnitude): the card's ``√(I²+Q²)`` as ``uint16`` or
+    #: ``float32``, or a software front end's (``sw_amplitude_sac``). Use
+    #: :meth:`File.get_amplitude` / :meth:`File.get_magnitude`.
+    AMPLITUDE = "amplitude"
+    #: The card's I, ``int16`` (the ``i_component/`` file). Use :meth:`File.get_i`.
+    I = "i"  # noqa: E741
+    #: The card's Q, ``int16`` (the ``q_component/`` file). Use :meth:`File.get_q`.
+    Q = "q"
+    #: A script's output (Sandbox), typed by its content type (or, for
+    #: ``sw_custom``, by its flags). Read with :meth:`File.read_lines`.
+    CUSTOM = "custom"
+    #: Zone variances of the console's archives (``viz_variance``,
+    #: ``float32``, in the square of the source column's unit). Use
+    #: :meth:`File.get_variance`.
+    VARIANCE = "variance"
+    #: The same variances on the console's Log scale, ``log10(1 +
+    #: variance)`` (``viz_logvar``). Use :meth:`File.get_log_variance`, or
+    #: :meth:`File.get_variance` for the variance itself.
+    LOG_VARIANCE = "log_variance"
 
     @classmethod
     def from_flags(cls, flags: int) -> "Mode":
-        """Decode the high-level mode from a raw header flag mask."""
+        """Decode the mode from a raw header flag mask — the rule of a file
+        written before the content type existed (content type 0)."""
         if flags & FLAG_PHASE:
             return cls.PHASE
         if flags & FLAG_INTERLEAVED:
@@ -133,6 +176,40 @@ class Mode(Enum):
                 return cls.ARCTAN_MAGNITUDE
             return cls.IQ
         return cls.RAW
+
+    @classmethod
+    def from_header(cls, h: Header) -> "Mode":
+        """The mode of a file of header ``h``: from its content type; from
+        its flags (:meth:`from_flags`) for content type 0, a value this SDK
+        does not know, or a ``sample_size`` the content type contradicts."""
+        ct = h.normalized_content_type
+        info = _content.info(ct)
+        if ct == 0 or info is None or h.sample_size_contradicts_content_type:
+            return cls.from_flags(h.flags)
+        if info.members is not None:
+            return _PAIR_MODES[info.members[0].quantity]
+        return _QUANTITY_MODES[info.quantity]
+
+
+#: The mode of each single-column quantity of the registry.
+_QUANTITY_MODES = {
+    "raw": Mode.RAW,
+    "phase": Mode.PHASE,
+    "arctan": Mode.ARCTAN,
+    "amplitude": Mode.AMPLITUDE,
+    "i": Mode.I,
+    "q": Mode.Q,
+    "custom": Mode.CUSTOM,
+    "variance": Mode.VARIANCE,
+    "log_variance": Mode.LOG_VARIANCE,
+}
+
+#: The mode of each pair, by the quantity of its member 0.
+_PAIR_MODES = {
+    "i": Mode.IQ,
+    "arctan": Mode.ARCTAN_MAGNITUDE,
+    "phase": Mode.PHASE_AMPLITUDE,
+}
 
 
 # ── Bool-callable flag wrapper ──────────────────────────────────────────────
@@ -250,6 +327,7 @@ class File:
     _compression: Optional[str] = None
     _quantization_step_rad: Optional[float] = None
     _quantization_max_error_rad: Optional[float] = None
+    _source_content_type: Optional[int] = None
     _trailing_bytes: int = 0
 
     # Suffix → backend class name (looked up in ``_formats``). Adding a
@@ -311,7 +389,9 @@ class File:
         self._quantization_max_error_rad = getattr(
             self._backend, "quantization_max_error_rad", None
         )
+        self._source_content_type = getattr(self._backend, "source_content_type", None)
         self._trailing_bytes = int(getattr(self._backend, "trailing_bytes", 0) or 0)
+        _warn_about_the_header(path, self._header)
         if self._trailing_bytes:
             warnings.warn(
                 f"{path}: {self._trailing_bytes} byte(s) after the last whole line "
@@ -451,8 +531,9 @@ class File:
 
     @property
     def mode(self) -> Mode:
-        """High-level acquisition mode — see :class:`Mode`."""
-        return Mode.from_flags(self._header.flags)
+        """What the file holds — see :class:`Mode`: from the content type,
+        or from the flags on a file written before it existed."""
+        return Mode.from_header(self._header)
 
     @property
     def line_size(self) -> int:
@@ -461,7 +542,8 @@ class File:
 
     @property
     def positions_per_line(self) -> int:
-        """Spatial fibre positions per pulse — ``line_size / 2`` if INTERLEAVED."""
+        """Spatial fibre positions per pulse — ``line_size / 2`` for a file of
+        pairs (:attr:`is_interleaved`), ``line_size`` otherwise."""
         return self._header.positions_per_line
 
     @property
@@ -743,11 +825,87 @@ class File:
 
     @property
     def card(self) -> Optional[str]:
-        """The acquisition card that recorded the file (``"pcie7818"``,
-        ``"pcie7821"``…) on a dual-card run, or ``None``: a single-card run,
-        an older capture, or a format that does not carry it (only the DAT
-        header does, bytes 65..81)."""
+        """The code of the acquisition card that recorded the file —
+        ``"p18"``, ``"p21"``, ``"s125"`` or ``"s500"`` — or ``None`` when the
+        file does not say. Every file of data format v1 carries it (DAT
+        header, HDF5 / TDMS ``card``, SEG-Y ``CARD:`` line); before v1 only
+        the DAT files of a two-card run did."""
         return self._header.card
+
+    @property
+    def format_version(self) -> int:
+        """The data format version the file was written in: ``1`` for data
+        format v1 (content type authoritative, steps and duration in the
+        header), ``0`` for a file written before it."""
+        return self._header.format_version
+
+    @property
+    def duration_s(self) -> Optional[int]:
+        """The duration the writer recorded when it closed the file, in whole
+        seconds rounded down — or ``None`` when the file does not say (a
+        file written before data format v1, one cut short by a crash, one
+        under a second). :attr:`duration` is the duration measured from the
+        lines, to the nanosecond."""
+        return self._header.duration_s or None
+
+    @property
+    def spatial_step_m(self) -> Optional[float]:
+        """Metres of fibre between two adjacent positions (columns).
+
+        The file's own value when it carries one (data format v1; the zone
+        spacing of an archive export); else derived from the sample rate,
+        ``1e8 / sample_rate`` (light at 2·10⁸ m/s in the fibre, halved for
+        the round trip) for samples that are the acquisition's own; else
+        ``None`` (a script's output, an archive export of an older file).
+        """
+        h = self._header
+        step = h.spatial_step_m or h.derived_spatial_step_m
+        return step or None
+
+    @property
+    def temporal_step_s(self) -> Optional[float]:
+        """Seconds between two lines: the file's own value when it carries
+        one, else the card's real line period (``1 / trig_frequency_real_hz``),
+        else ``None``. Informative — times come from :meth:`line_time_ns`."""
+        h = self._header
+        step = h.temporal_step_s or h.derived_temporal_step_s
+        return step or None
+
+    @property
+    def quantity(self) -> Optional[str]:
+        """What the samples are, from the content type: ``"raw"``,
+        ``"phase"``, ``"arctan"``, ``"amplitude"``, ``"i"``, ``"q"``,
+        ``"custom"``, ``"variance"``, ``"log_variance"`` — or both members
+        of a file of pairs (``"phase+amplitude"``). ``None`` when the
+        content type does not say (content type 0: see :attr:`mode`; a value
+        this SDK does not know)."""
+        return _join_members(self._header, "quantity")
+
+    @property
+    def unit(self) -> Optional[str]:
+        """The unit of the samples, from the content type: ``"rad"``,
+        ``"count"`` (the card's integer scale), ``"adc_count"``,
+        ``"front_end_count"``, ``"source_unit_squared"``,
+        ``"dimensionless"``, ``"script"`` — or ``"rad+count"`` for a file of
+        pairs; ``None`` when the content type does not say."""
+        return _join_members(self._header, "unit")
+
+    @property
+    def source_content_type(self) -> Optional[int]:
+        """An archive export of zone variances (content type 27 or 28, HDF5):
+        the content type of the column the variance was computed from;
+        ``None`` otherwise."""
+        return self._source_content_type
+
+    @property
+    def sibling_path(self) -> Optional[Path]:
+        """The other file of a split pair, when it is on disk: the
+        ``amplitude/`` file of a ``phase/`` file (and back), ``magnitude/``
+        of ``arctan/``, ``q_component/`` of ``i_component/``. Since data
+        format v1 a recording writes each member of an interleaved stream to
+        its own file, same name, sibling directories. ``None`` for any other
+        file or when the sibling is missing."""
+        return _sibling_path(self._path, self._header)
 
     @property
     def compression(self) -> Optional[str]:
@@ -793,13 +951,14 @@ class File:
 
     @property
     def is_mozart(self) -> Optional[bool]:
-        """Whether the samples are the GPU Mozart software phase, or ``None``
-        when the question does not apply.
+        """Whether the samples are the Mozart software phase (Mozart or
+        Mozart+), or ``None`` when the question does not apply.
 
         * A file that carries a content type (:attr:`content_type` ≠ 0) is
-          answered by it alone: ``True`` for ``sw_mozart``, ``None`` for
-          ``raw`` (no demodulation ran) and for a content type this SDK does
-          not know, ``False`` for every other one.
+          answered by it alone: ``True`` for ``sw_mozart`` and
+          ``sw_mozart_plus``, ``None`` for ``raw`` (no demodulation ran) and
+          for a content type this SDK does not know, ``False`` for every
+          other one.
         * A capture written before the content type existed (``0``) keeps
           the flag-based answer: ``None`` when the ``DEMODULATED`` bit is
           clear, else whether the ``MOZART`` bit is set.
@@ -812,10 +971,11 @@ class File:
 
     @property
     def dtype(self) -> np.dtype:
-        """numpy dtype :meth:`read_lines` returns: ``(sample_size, FLOAT)``,
+        """numpy dtype :meth:`read_lines` returns: the content type's sample
+        type (``int16``, ``uint16`` — a magnitude —, ``float32``); for a file
+        written before the content type existed, ``(sample_size, FLOAT)``,
         signed integers except a single-column ``UNSIGNED`` file
-        (``uint16``: the ``magnitude/`` child of a split arctan/magnitude
-        stream) and 1-byte samples (``uint8``)."""
+        (``uint16``) and 1-byte samples (``uint8``)."""
         return _dtype_for(self._header)
 
     @property
@@ -854,24 +1014,35 @@ class File:
     def distance(self) -> float:
         """Length of fibre (m) one line covers, measured one way along the fibre.
 
-        ``positions_per_line · c / (2 · sample_rate)`` with ``c = 2·10⁸ m/s``:
-        a sample spans ``1 / sample_rate`` of the pulse's round trip, hence
-        the 2 — the result is the distance along the fibre, not the path the
-        light travels.
+        ``positions_per_line · spatial_step_m`` when the file carries its
+        spatial step (data format v1; the zone spacing of an archive
+        export); otherwise ``positions_per_line · c / (2 · sample_rate)``
+        with ``c = 2·10⁸ m/s``: a sample spans ``1 / sample_rate`` of the
+        pulse's round trip, hence the 2 — the result is the distance along
+        the fibre, not the path the light travels. Both give the same
+        length for the acquisition's own samples.
         """
         positions = max(self.positions_per_line, 1)
+        step = self._header.spatial_step_m
+        if step > 0 and step != self._header.derived_spatial_step_m:
+            return positions * step
         return (_LIGHT_SPEED_IN_FIBER * positions) / (2 * max(self.sample_rate, 1))
 
     # ── Flag predicates (properties — bool-callable for legacy compat) ──
 
+    # From the content type (data format v1 writes these flags as 0); from
+    # the header flags, as before, on a file written before it existed.
+
     @property
     def is_demodulated(self) -> _Flag:
-        """True if the on-board DSP was used (PCIe7821 demod modes)."""
+        """True if the samples come out of a demodulation, on board or in
+        software (phase, arctan, amplitude, I or Q)."""
         return _Flag(self._header.is_demodulated)
 
     @property
     def is_interleaved(self) -> _Flag:
-        """True if the wire carries 2 samples per spatial position."""
+        """True if the file carries 2 samples per spatial position (a file
+        of pairs written before data format v1)."""
         return _Flag(self._header.is_interleaved)
 
     @property
@@ -881,14 +1052,14 @@ class File:
 
     @property
     def is_phase(self) -> _Flag:
-        """True if the file carries unwrapped DAS phase (rad)."""
+        """True if the file carries a phase in radians (alone, or as the
+        first member of phase/amplitude pairs)."""
         return _Flag(self._header.is_phase)
 
     @property
     def is_unsigned(self) -> _Flag:
-        """True if the ``UNSIGNED`` bit is set: the odd lane of an
-        INTERLEAVED pair is u16 (magnitude), or, on a single column, every
-        sample is (read as ``uint16``)."""
+        """True if (some of) the integer samples are unsigned: a ``uint16``
+        magnitude column, or the magnitude lane of arctan/magnitude pairs."""
         return _Flag(self._header.is_unsigned)
 
     @property
@@ -954,41 +1125,90 @@ class File:
             raise ValueError("n must be >= 0")
         self._require_open().seek(int(n))
 
+    # ── Export ─────────────────────────────────────────────────────────
+
+    def export_dat(
+        self,
+        path: Union[str, Path],
+        *,
+        start: int = 0,
+        count: Optional[int] = None,
+        chunk_lines: int = 65_536,
+    ) -> None:
+        """Write lines ``start .. start + count`` (default: to the end) to a
+        ``.dat``, with this file's whole header: content type, card, steps,
+        trigger pre-roll, the card's rational, time flags (see
+        :func:`export_dat`). The first line's time is :meth:`line_time_ns`
+        of ``start`` — the corrected time on a file stamped from the card's
+        time map. The data is copied ``chunk_lines`` lines at a time; the
+        read cursor is put back where it was.
+        """
+        start = operator.index(start)
+        if not 0 <= start <= self._num_lines:
+            raise ValueError(f"start must be within 0..{self._num_lines} (got {start})")
+        available = self._num_lines - start
+        count = available if count is None else min(operator.index(count), available)
+        if count < 0:
+            raise ValueError(f"count must be >= 0 (got {count})")
+        backend = self._require_open()
+        h = self._header
+        if h.acquisition_ns:
+            h = _formats.replace_header(h, acquisition_ns=self.line_time_ns(start))
+        header = _file_header(h, self.dtype, self.line_size, count)
+        cursor = self._num_lines - backend.lines_left
+
+        def blocks():
+            backend.seek(start)
+            left = count
+            while left > 0:
+                block = backend.read_lines(min(chunk_lines, left))
+                left -= block.shape[0]
+                yield block
+
+        try:
+            _write_dat(path, header, blocks())
+        finally:
+            backend.seek(cursor)
+
     # ── Channel extractors ─────────────────────────────────────────────
     #
     # Each extractor accepts an optional pre-read array. Passing ``None``
     # reads ``n`` new pulses from the file; passing an array re-uses the
     # buffer the user already has (e.g. across multiple extractors in
     # the same loop iteration so the file cursor isn't double-advanced).
+    #
+    # A file of data format v1 holds one quantity: the extractor of that
+    # quantity returns its column. A file of pairs (written before v1)
+    # returns the member asked for.
 
     def get_i(
         self, data: Optional[np.ndarray] = None, *, n: int = 1
     ) -> np.ndarray:
         """
-        Extract the **I** lane of an INTERLEAVED I/Q file (PCIe7821
-        :attr:`Mode.IQ`).
+        The card's **I**: the ``i_component/`` file (:attr:`Mode.I`) or the
+        I lane of I/Q pairs (:attr:`Mode.IQ`).
 
         Returns a ``(rows, positions_per_line)`` ``int16`` array.
-        Raises :class:`ValueError` if the file's mode is not
-        :attr:`Mode.IQ`.
+        Raises :class:`ValueError` for any other mode.
         """
-        self._require_mode("get_i", Mode.IQ)
-        return _core.split_pair_i16_primary(self._ensure(data, n))
+        return self._i_of(self._require_mode("get_i", Mode.I, Mode.IQ), data, n)
 
     def get_q(
         self, data: Optional[np.ndarray] = None, *, n: int = 1
     ) -> np.ndarray:
-        """Extract the **Q** lane of an INTERLEAVED I/Q file."""
-        self._require_mode("get_q", Mode.IQ)
-        return _core.split_pair_i16_secondary(self._ensure(data, n))
+        """The card's **Q**: the ``q_component/`` file (:attr:`Mode.Q`) or
+        the Q lane of I/Q pairs (:attr:`Mode.IQ`)."""
+        return self._q_of(self._require_mode("get_q", Mode.Q, Mode.IQ), data, n)
 
     def get_iq(
         self, data: Optional[np.ndarray] = None, *, n: int = 1
     ) -> np.ndarray:
         """
-        Combined ``complex64`` view of an INTERLEAVED I/Q file:
+        Combined ``complex64`` view of I/Q pairs (:attr:`Mode.IQ`):
         ``result[r, j] = I[r, j] + j·Q[r, j]``. Returns
-        ``(rows, positions_per_line)`` ``complex64``.
+        ``(rows, positions_per_line)`` ``complex64``. A recording of data
+        format v1 keeps I and Q in two files: read :meth:`get_i` from one and
+        :meth:`get_q` from its :attr:`sibling_path`.
         """
         self._require_mode("get_iq", Mode.IQ)
         return _core.split_pair_to_complex_i16(self._ensure(data, n))
@@ -997,71 +1217,117 @@ class File:
         self, data: Optional[np.ndarray] = None, *, n: int = 1
     ) -> np.ndarray:
         """
-        Extract the **arctan(Q/I)** lane of an INTERLEAVED arctan/√
-        file (PCIe7821 :attr:`Mode.ARCTAN_MAGNITUDE`). Returns
-        ``(rows, positions_per_line)`` ``int16`` — the fixed-point
-        scale is ``32767 ↔ +π`` (vendor convention).
+        The card's wrapped **arctan(Q/I)**: the ``arctan/`` file
+        (:attr:`Mode.ARCTAN`) or the arctan lane of arctan/magnitude pairs
+        (:attr:`Mode.ARCTAN_MAGNITUDE`). Returns ``(rows,
+        positions_per_line)`` ``int16`` — the fixed-point scale is
+        ``32767 ↔ +π`` (:meth:`get_arctan_radians` converts).
         """
-        self._require_mode("get_arctan", Mode.ARCTAN_MAGNITUDE)
-        return _core.split_pair_i16_primary(self._ensure(data, n))
+        mode = self._require_mode("get_arctan", Mode.ARCTAN, Mode.ARCTAN_MAGNITUDE)
+        return self._arctan_of(mode, data, n)
+
+    def get_amplitude(
+        self, data: Optional[np.ndarray] = None, *, n: int = 1
+    ) -> np.ndarray:
+        """
+        The **amplitude**: the column of an amplitude file
+        (:attr:`Mode.AMPLITUDE` — the card's magnitude as ``uint16``
+        (``magnitude/`` of an arctan/magnitude recording) or ``float32``
+        (``amplitude/`` of a demodulation that kept it), or a software front
+        end's ``float32``), or the amplitude member of a file of pairs
+        (:attr:`Mode.ARCTAN_MAGNITUDE`: ``uint16``;
+        :attr:`Mode.PHASE_AMPLITUDE`: ``float32``). Returns ``(rows,
+        positions_per_line)``.
+        """
+        mode = self._require_mode("get_amplitude", *_AMPLITUDE_MODES)
+        return self._amplitude_of(mode, data, n)
 
     def get_magnitude(
         self, data: Optional[np.ndarray] = None, *, n: int = 1
     ) -> np.ndarray:
         """
-        Extract the **√(I²+Q²)** magnitude lane of an INTERLEAVED
-        arctan/√ file, reinterpreted as ``u16`` (the wire buffer is
-        typed ``i16`` end-to-end but the vendor sends magnitudes as
-        unsigned). Returns ``(rows, positions_per_line)`` ``uint16``.
+        The **√(I²+Q²)** magnitude — :meth:`get_amplitude` under the name
+        the card's arctan/magnitude tap gives it: the ``uint16`` lane of
+        arctan/magnitude pairs (the wire buffer is typed ``i16`` end to end
+        but the card sends magnitudes as unsigned), or the column of an
+        amplitude file (:attr:`Mode.AMPLITUDE`), or the amplitude member of
+        phase/amplitude pairs.
         """
-        self._require_mode("get_magnitude", Mode.ARCTAN_MAGNITUDE)
-        return _core.split_pair_unsigned(self._ensure(data, n))
+        mode = self._require_mode("get_magnitude", *_AMPLITUDE_MODES)
+        return self._amplitude_of(mode, data, n)
 
     def get_phase(
         self, data: Optional[np.ndarray] = None, *, n: int = 1
     ) -> np.ndarray:
         """
-        Phase samples (``float32`` radians) for PCIe7821
-        :attr:`Mode.PHASE` files. One sample per spatial position, no
-        INTERLEAVED pair. Returns ``(rows, positions_per_line)``
-        ``float32``.
+        Phase samples (``float32`` radians): the column of a phase file
+        (:attr:`Mode.PHASE` — the card's phase or a software
+        demodulation's, :attr:`content_type_name` says which) or the phase
+        member of phase/amplitude pairs (:attr:`Mode.PHASE_AMPLITUDE`).
+        Returns ``(rows, positions_per_line)`` ``float32``.
 
-        For consistency with the other extractors this method exists
-        even though Phase files are already one sample per position
-        — passing ``data`` returns it unchanged; passing nothing reads
-        ``n`` new pulses.
+        On a phase file passing ``data`` returns it unchanged; passing
+        nothing reads ``n`` new pulses.
         """
-        self._require_mode("get_phase", Mode.PHASE)
-        if data is not None:
-            return np.ascontiguousarray(data)
-        return self.read_lines(n)
+        if self._require_mode("get_phase", Mode.PHASE, Mode.PHASE_AMPLITUDE) is Mode.PHASE:
+            return self._column(data, n)
+        return _core.split_pair_f32_primary(self._f32_pairs(data, n))
+
+    def get_variance(
+        self, data: Optional[np.ndarray] = None, *, n: int = 1
+    ) -> np.ndarray:
+        """
+        Zone **variances** of a console archive export, ``float32``, in the
+        square of the source column's unit (:attr:`source_content_type`):
+        the column of a ``viz_variance`` file (:attr:`Mode.VARIANCE`), or a
+        ``viz_logvar`` file (:attr:`Mode.LOG_VARIANCE`) converted back,
+        ``10^v − 1``.
+        """
+        if self._require_mode("get_variance", Mode.VARIANCE, Mode.LOG_VARIANCE) is Mode.VARIANCE:
+            return self._column(data, n)
+        v = np.asarray(self._column(data, n), dtype=np.float64)
+        return (np.power(10.0, v) - 1.0).astype(np.float32)
+
+    def get_log_variance(
+        self, data: Optional[np.ndarray] = None, *, n: int = 1
+    ) -> np.ndarray:
+        """
+        Zone variances on the console's **Log scale**, ``log10(1 +
+        max(variance, 0))``, ``float32``: the column of a ``viz_logvar`` file
+        (:attr:`Mode.LOG_VARIANCE`), or a ``viz_variance`` file
+        (:attr:`Mode.VARIANCE`) put on that scale.
+        """
+        if self._require_mode("get_log_variance", Mode.LOG_VARIANCE, Mode.VARIANCE) is Mode.LOG_VARIANCE:
+            return self._column(data, n)
+        v = np.asarray(self._column(data, n), dtype=np.float64)
+        return np.log10(1.0 + np.maximum(v, 0.0)).astype(np.float32)
 
     # ── Physical-unit extractors (float32, scaled to the underlying physics) ──
     #
-    # I, Q and the magnitude are physically continuous voltages on the
-    # photodetector, stored as fixed-point integers on the wire (i16 for
-    # I/Q, u16 for the magnitude). Arctan is a continuous angle stored
-    # as i16 with the vendor convention ``32767 ↔ +π``. The methods below
-    # return ``float32`` numpy arrays in the natural physical unit.
+    # I, Q and the card's magnitude are physically continuous voltages on
+    # the photodetector, stored as fixed-point integers (i16 for I/Q, u16
+    # for the magnitude). Arctan is a continuous angle stored as i16 with
+    # the card's convention ``32767 ↔ +π``. The methods below return
+    # ``float32`` numpy arrays in the natural physical unit.
     #
     # The volt scaling uses ``self.range`` (from the ADC voltage range
     # field of the header). The radian scaling for arctan uses
-    # ``π / 32768`` — vendor-specified and not user-configurable.
+    # ``π / 32768`` — fixed by the card, not user-configurable.
 
     def get_i_volts(self, data: Optional[np.ndarray] = None, *, n: int = 1) -> np.ndarray:
         """
-        Like :meth:`get_i` but returns the I lane as a ``float32``
-        numpy array scaled to **volts**: ``f32 = i16 × range / 32768``.
-        Use this when you want physically-meaningful values without
-        having to remember the ADC scaling.
+        Like :meth:`get_i` but returns I as a ``float32`` numpy array scaled
+        to **volts**: ``f32 = i16 × range / 32768``. Use this when you want
+        physically-meaningful values without having to remember the ADC
+        scaling.
         """
-        self._require_mode("get_i_volts", Mode.IQ)
-        return _to_volts_i16(_core.split_pair_i16_primary(self._ensure(data, n)), self.range)
+        mode = self._require_mode("get_i_volts", Mode.I, Mode.IQ)
+        return _to_volts_i16(self._i_of(mode, data, n), self.range)
 
     def get_q_volts(self, data: Optional[np.ndarray] = None, *, n: int = 1) -> np.ndarray:
-        """Like :meth:`get_q` but returns the Q lane as ``float32`` volts."""
-        self._require_mode("get_q_volts", Mode.IQ)
-        return _to_volts_i16(_core.split_pair_i16_secondary(self._ensure(data, n)), self.range)
+        """Like :meth:`get_q` but returns Q as ``float32`` volts."""
+        mode = self._require_mode("get_q_volts", Mode.Q, Mode.IQ)
+        return _to_volts_i16(self._q_of(mode, data, n), self.range)
 
     def get_iq_volts(self, data: Optional[np.ndarray] = None, *, n: int = 1) -> np.ndarray:
         """
@@ -1086,29 +1352,36 @@ class File:
         self, data: Optional[np.ndarray] = None, *, n: int = 1
     ) -> np.ndarray:
         """
-        Like :meth:`get_arctan` but returns the arctan lane as a
-        ``float32`` numpy array in **radians**, scaled with the vendor
-        convention ``32767 ↔ +π`` (``f32 = i16 × π / 32768``). Range
-        is ``[-π, +π]``, the raw wrapped output of the FPGA arctan2.
+        Like :meth:`get_arctan` but returns the arctan as a ``float32`` numpy
+        array in **radians**, scaled with the card's convention
+        ``32767 ↔ +π`` (``f32 = i16 × π / 32768``). Range is ``[-π, +π]``,
+        the raw wrapped output of the card's arctan2.
         """
-        self._require_mode("get_arctan_radians", Mode.ARCTAN_MAGNITUDE)
-        arr = _core.split_pair_i16_primary(self._ensure(data, n))
+        mode = self._require_mode("get_arctan_radians", Mode.ARCTAN, Mode.ARCTAN_MAGNITUDE)
+        arr = self._arctan_of(mode, data, n)
         return arr.astype(np.float32) * np.float32(np.pi / 32768.0)
 
     def get_magnitude_volts(
         self, data: Optional[np.ndarray] = None, *, n: int = 1
     ) -> np.ndarray:
         """
-        Like :meth:`get_magnitude` but returns the magnitude lane as a
-        ``float32`` numpy array in **volts**:
-        ``f32 = u16 × range / 32768``.
+        Like :meth:`get_magnitude` but returns the card's magnitude as a
+        ``float32`` numpy array in **volts**: ``f32 = magnitude × range /
+        32768``.
 
-        The LSB scaling matches the I/Q lanes (the FPGA computes
+        The LSB scaling matches the I/Q lanes (the card computes
         ``√(I²+Q²)`` from the same i16 I/Q codes and keeps the same
-        per-LSB voltage). The output is always ≥ 0.
+        per-LSB voltage). The output is always ≥ 0. Only for the card's
+        magnitude (unit ``count``): a software front end's amplitude
+        (``sw_amplitude_sac``) is on another scale and is refused.
         """
-        self._require_mode("get_magnitude_volts", Mode.ARCTAN_MAGNITUDE)
-        arr = _core.split_pair_unsigned(self._ensure(data, n))
+        mode = self._require_mode("get_magnitude_volts", *_AMPLITUDE_MODES)
+        if mode is not Mode.ARCTAN_MAGNITUDE and _amplitude_unit(self._header) != "count":
+            raise ValueError(
+                f"get_magnitude_volts: the amplitude of {self.content_type_name!r} is not "
+                "the card's magnitude (it is not on the ADC's scale); use get_amplitude()"
+            )
+        arr = self._amplitude_of(mode, data, n)
         return arr.astype(np.float32) * np.float32(self.range / 32768.0)
 
     def channels(self, data: Optional[np.ndarray] = None, *, n: int = 1) -> dict:
@@ -1117,33 +1390,41 @@ class File:
         keys depend on the :attr:`mode`::
 
             Mode.RAW              -> {"samples": ndarray}
+            Mode.CUSTOM           -> {"samples": …}
+            Mode.PHASE            -> {"phase": …}
+            Mode.AMPLITUDE        -> {"amplitude": …}
+            Mode.ARCTAN           -> {"arctan": …}
+            Mode.I / Mode.Q       -> {"i": …} / {"q": …}
+            Mode.VARIANCE         -> {"variance": …}
+            Mode.LOG_VARIANCE     -> {"log_variance": …}
             Mode.IQ               -> {"i": …, "q": …, "iq": complex64}
             Mode.ARCTAN_MAGNITUDE -> {"arctan": …, "magnitude": …}
-            Mode.PHASE            -> {"phase": …}
+            Mode.PHASE_AMPLITUDE  -> {"phase": …, "amplitude": …}
 
         Convenience for ad-hoc scripts: pass a pre-read buffer if you
         already have one, otherwise the method reads ``n`` pulses.
         """
         m = self.mode
-        if m is Mode.RAW:
-            buf = self._ensure(data, n)
-            return {"samples": buf}
+        buf = self._ensure(data, n)
         if m is Mode.IQ:
-            buf = self._ensure(data, n)
             return {
                 "i": _core.split_pair_i16_primary(buf),
                 "q": _core.split_pair_i16_secondary(buf),
                 "iq": _core.split_pair_to_complex_i16(buf),
             }
         if m is Mode.ARCTAN_MAGNITUDE:
-            buf = self._ensure(data, n)
             return {
                 "arctan": _core.split_pair_i16_primary(buf),
                 "magnitude": _core.split_pair_unsigned(buf),
             }
-        # PHASE
-        buf = self._ensure(data, n)
-        return {"phase": buf}
+        if m is Mode.PHASE_AMPLITUDE:
+            pairs = self._f32_pairs(buf, n)
+            return {
+                "phase": _core.split_pair_f32_primary(pairs),
+                "amplitude": _core.split_pair_f32_secondary(pairs),
+            }
+        key = {Mode.RAW: "samples", Mode.CUSTOM: "samples"}.get(m, m.value)
+        return {key: buf}
 
     # ── Helpers ────────────────────────────────────────────────────────
 
@@ -1152,12 +1433,46 @@ class File:
             return self.read_lines(n)
         return np.ascontiguousarray(data)
 
-    def _require_mode(self, method: str, expected: Mode) -> None:
-        if self.mode is expected:
-            return
+    def _column(self, data: Optional[np.ndarray], n: int) -> np.ndarray:
+        """The single column of a file of one quantity, as read."""
+        return self._ensure(data, n)
+
+    # The member of a mode already checked by the public extractor.
+
+    def _i_of(self, mode: Mode, data, n: int) -> np.ndarray:
+        if mode is Mode.I:
+            return self._column(data, n)
+        return _core.split_pair_i16_primary(self._ensure(data, n))
+
+    def _q_of(self, mode: Mode, data, n: int) -> np.ndarray:
+        if mode is Mode.Q:
+            return self._column(data, n)
+        return _core.split_pair_i16_secondary(self._ensure(data, n))
+
+    def _arctan_of(self, mode: Mode, data, n: int) -> np.ndarray:
+        if mode is Mode.ARCTAN:
+            return self._column(data, n)
+        return _core.split_pair_i16_primary(self._ensure(data, n))
+
+    def _amplitude_of(self, mode: Mode, data, n: int) -> np.ndarray:
+        if mode is Mode.AMPLITUDE:
+            return self._column(data, n)
+        if mode is Mode.ARCTAN_MAGNITUDE:
+            return _core.split_pair_unsigned(self._ensure(data, n))
+        return _core.split_pair_f32_secondary(self._f32_pairs(data, n))
+
+    def _f32_pairs(self, data: Optional[np.ndarray], n: int) -> np.ndarray:
+        """Phase/amplitude pairs as ``float32`` (what the pair kernels take)."""
+        return np.ascontiguousarray(self._ensure(data, n), dtype=np.float32)
+
+    def _require_mode(self, method: str, *expected: Mode) -> Mode:
+        mode = self.mode
+        if mode in expected:
+            return mode
+        wanted = " or ".join(repr(m.value) for m in expected)
         raise ValueError(
-            f"{method}: file mode is {self.mode.value!r}, but this extractor "
-            f"only applies to {expected.value!r}. "
+            f"{method}: file mode is {mode.value!r}, but this extractor "
+            f"only applies to {wanted}. "
             f"Inspect file.mode to dispatch — see the Mode enum docs."
         )
 
@@ -1183,6 +1498,92 @@ class File:
             f"duration={self.duration:.2f}s, distance={self.distance:.2f}m"
             f"{state})"
         )
+
+
+# ── Content-type helpers ────────────────────────────────────────────────────
+
+#: The modes :meth:`File.get_amplitude` reads.
+_AMPLITUDE_MODES = (Mode.AMPLITUDE, Mode.ARCTAN_MAGNITUDE, Mode.PHASE_AMPLITUDE)
+
+
+def _warn_about_the_header(path: Path, h: Header) -> None:
+    """Say so, once per file opened, when the header cannot be read as what
+    it says: a content type this SDK does not know (its samples are decoded
+    from ``sample_size`` and the flags, its quantity is unknown), a
+    ``sample_size`` the content type contradicts (read from the flags), a
+    newer data format version (the fields this SDK knows are read)."""
+    if h.content_type != 0 and _content.info(h.content_type) is None:
+        warnings.warn(
+            f"{path}: content type {h.content_type} is not known to this "
+            "invisensing (a newer producer?): its samples are decoded from "
+            "sample_size and the flags, and nothing is assumed about what "
+            "they are. Upgrade invisensing.",
+            stacklevel=3,
+        )
+    elif h.sample_size_contradicts_content_type:
+        warnings.warn(
+            f"{path}: content type {h.content_type_name} ({h.content_type}) "
+            f"carries {_content.sample_size(h.normalized_content_type)}-byte "
+            f"samples, but the header says {h.sample_size}: read from the flags",
+            stacklevel=3,
+        )
+    if h.format_version > FORMAT_VERSION:
+        warnings.warn(
+            f"{path}: data format version {h.format_version} is newer than "
+            f"this invisensing reads in full ({FORMAT_VERSION}): the fields it "
+            "knows are read. Upgrade invisensing.",
+            stacklevel=3,
+        )
+
+
+def _join_members(h: Header, field: str) -> Optional[str]:
+    """A registry column (``quantity`` / ``unit``) of a header's content
+    type: the value, or ``m0+m1`` for a pair; ``None`` when the content type
+    does not say (0, unknown, contradicted)."""
+    ct = h.normalized_content_type
+    info = _content.info(ct)
+    if ct == 0 or info is None or h.sample_size_contradicts_content_type:
+        return None
+    if info.members is not None:
+        return "+".join(getattr(m, field) for m in info.members)
+    return getattr(info, field)
+
+
+def _amplitude_unit(h: Header) -> Optional[str]:
+    """The unit of a header's amplitude (the column, or the amplitude member
+    of a pair); ``"count"`` for a file described by its flags (written
+    before the content type existed: always the card's magnitude)."""
+    ct = h.normalized_content_type
+    info = _content.info(ct)
+    if ct == 0 or info is None or h.sample_size_contradicts_content_type:
+        return "count"
+    if info.members is not None:
+        k = _content.member_of(ct, "amplitude")
+        return None if k is None else info.members[k[0]].unit
+    return info.unit
+
+
+#: Extensions a recording's sibling may carry (an HDF5 written before data
+#: format v1 is ``.hdf5``, after it ``.h5``).
+_SIBLING_SUFFIXES = {".h5": (".h5", ".hdf5"), ".hdf5": (".hdf5", ".h5")}
+
+
+def _sibling_path(path: Path, h: Header) -> Optional[Path]:
+    """The other file of the split pair ``path`` belongs to (see
+    :attr:`File.sibling_path`)."""
+    ct = h.normalized_content_type
+    here = path.parent.name
+    for info in _content.REGISTRY.values():
+        for k, member in enumerate(info.members or ()):
+            if member.child != ct or member.subdir != here:
+                continue
+            other = info.members[1 - k].subdir
+            for suffix in _SIBLING_SUFFIXES.get(path.suffix.lower(), (path.suffix,)):
+                candidate = path.parent.parent / other / (path.stem + suffix)
+                if candidate.is_file():
+                    return candidate
+            return None
+    return None
 
 
 # ── dtype helper ────────────────────────────────────────────────────────────
@@ -1232,8 +1633,8 @@ def _axis_time_ns(lines, ns, period_fs, timing, line: int) -> int:
 
 #: The highest trigger frequency an Audace header carries, Hz.
 _MAX_TRIG_FREQUENCY_HZ = 10_000_000
-#: The slowest clock a card counts its trigger period in: a Spectrum M2p's
-#: 125 MHz pulse generator (the PCIe cards count in 250 MHz).
+#: The slowest clock a card counts its trigger period in: 125 MHz (the
+#: other cards count in 250 MHz).
 _SLOWEST_TRIGGER_CLOCK_HZ = 125_000_000
 
 
@@ -1269,24 +1670,141 @@ def _to_volts_i16(arr: np.ndarray, range_v: float) -> np.ndarray:
 
 # ── Write path ──────────────────────────────────────────────────────────────
 
+#: The flags a file of data format v1 keeps (AC and HIZ: acquisition
+#: hardware facts); everything the content type says is written 0.
+_FILE_KEPT_FLAGS = FLAG_AC | FLAG_HIZ
+
+#: numpy dtype of each sample type the registry fixes.
+_SAMPLE_DTYPES = {"i16": np.dtype("int16"), "u16": np.dtype("uint16"), "f32": np.dtype("float32")}
+
+
+def _file_header(h: Header, dtype: np.dtype, line_size: int, lines: int) -> Header:
+    """The header a DAT of ``lines`` lines of ``line_size`` samples of
+    ``dtype`` is written with, from header ``h`` — the
+    acquisition's rule for a conversion (``to_file_header``):
+
+    * a header whose content type is a single-column value of the
+      registry becomes a **data format v1** header: ``format_version`` 1,
+      the content type (a pre-v1 ``hw_amplitude`` with 4-byte samples is
+      ``hw_amplitude_f32``), the file flags (AC and HIZ; FLOAT and UNSIGNED
+      too for ``sw_custom``, which they type), the steps kept or derived,
+      the card code, no stream-only time fields, and ``duration_s`` of the
+      lines written. ``dtype`` must be the content type's sample type;
+    * any other header — content type 0, pairs, a value this SDK does not
+      know or whose sample size it contradicts — is written as a **legacy
+      copy**: content type, flags (FLOAT set from ``dtype``, as
+      :func:`export_dat` always did), version, steps, card and duration as
+      they are.
+    """
+    if not h.trig_frequency_is_exact:
+        raise ValueError(
+            f"the card fired at {h.trig_frequency_real_hz:.4f} Hz, not the "
+            f"{h.trig_frequency} Hz requested: a DAT never carries an inexact "
+            "trigger frequency (the acquisition refuses it too) — keep this "
+            "recording in HDF5"
+        )
+    dtype = np.dtype(dtype)
+    geometry = dict(line_size=int(line_size), sample_size=int(dtype.itemsize))
+    ct = h.normalized_content_type
+    info = _content.info(ct)
+    typed = (
+        ct != 0
+        and info is not None
+        and info.members is None
+        and not h.sample_size_contradicts_content_type
+    )
+    if not typed:
+        flags = h.flags | FLAG_FLOAT if dtype.kind == "f" else h.flags & ~FLAG_FLOAT
+        return _formats.replace_header(h, flags=flags, **geometry)
+    if info.sample_type == "from_flags":
+        # sw_custom: typed by its FLOAT / UNSIGNED flags, from the array.
+        flags = h.flags & _FILE_KEPT_FLAGS
+        if dtype.kind == "f":
+            flags |= FLAG_FLOAT
+        elif dtype.kind == "u":
+            flags |= FLAG_UNSIGNED
+    else:
+        want = _SAMPLE_DTYPES[info.sample_type]
+        if dtype != want:
+            raise ValueError(
+                f"content type {info.tag} ({ct}) is stored as {want}, "
+                f"but the data is {dtype}"
+            )
+        flags = h.flags & _FILE_KEPT_FLAGS
+    out = _formats.replace_header(
+        h,
+        content_type=ct,
+        flags=flags,
+        format_version=FORMAT_VERSION,
+        spatial_step_m=h.spatial_step_m or h.derived_spatial_step_m,
+        temporal_step_s=h.temporal_step_s or h.derived_temporal_step_s,
+        line_offset=0,
+        time_flags=h.time_flags & ~TIME_FLAG_MAP_V1,
+        **geometry,
+    )
+    return _formats.replace_header(out, duration_s=_duration_s(out, int(lines)))
+
+
+def _duration_s(h: Header, lines: int) -> int:
+    """Whole seconds of ``lines`` lines, rounded down, saturated to u32 —
+    exact on the cadence (``Header.lines_to_ns``); from ``temporal_step_s``
+    without one; 0 when neither is known."""
+    if h.line_timing is not None:
+        secs = max(h.lines_to_ns(lines), 0) // 1_000_000_000
+    elif h.temporal_step_s > 0:
+        secs = int(lines * h.temporal_step_s)
+    else:
+        secs = 0
+    return min(secs, 0xFFFF_FFFF)
+
+
+def _write_dat(path: Union[str, Path], header: Header, blocks) -> None:
+    """Write a DAT: the 128-byte header, then each block of lines,
+    little-endian."""
+    with open(path, "wb") as fp:
+        fp.write(build_header_bytes(header))
+        for block in blocks:
+            arr = np.ascontiguousarray(block)
+            fp.write(arr.astype(arr.dtype.newbyteorder("<"), copy=False).tobytes())
+
 
 def export_dat(
     path: Union[str, Path],
     data: np.ndarray,
     *,
-    sample_rate: int,
-    trig_frequency: int,
-    range_v: float = 0.0,
-    timestamp: str = "",
-    flags: int = 0,
-    pulse_width: int = 0,
-    num_channels: int = 1,
+    sample_rate: Optional[int] = None,
+    trig_frequency: Optional[int] = None,
+    range_v: Optional[float] = None,
+    timestamp: Optional[str] = None,
+    flags: Optional[int] = None,
+    pulse_width: Optional[int] = None,
+    num_channels: Optional[int] = None,
+    header: Optional[Header] = None,
+    content_type: Optional[int] = None,
+    card: Optional[str] = None,
+    acquisition_ns: Optional[int] = None,
 ) -> None:
     """
     Write a 2-D numpy array out as an Audace ``.dat`` file (128-byte
     header + raw samples). The array's ``shape[1]`` becomes
-    ``line_size`` and its dtype determines ``sample_size`` plus the
-    ``FLOAT`` flag.
+    ``line_size`` and its dtype ``sample_size``.
+
+    Two ways to describe the samples:
+
+    * ``header=`` (e.g. ``f.header`` of the file the data was read from):
+      **every field** is copied — timestamp, card, trigger pre-roll, the
+      card's trigger rational, time flags, content type, steps — as the
+      acquisition's conversions do. A content type of the registry gives a
+      file of data format v1 (``format_version`` 1, the file flags, the
+      steps filled, ``duration_s`` of the lines written; ``data`` must be of
+      the content type's sample type: ``f.read_lines()`` of a v1 file is);
+      content type 0, pairs and unknown values give a legacy copy, as they
+      are. :meth:`File.export_dat` does this for a range of a file's lines.
+    * the keyword fields below, as in earlier versions: a file of content
+      type 0 described by ``flags``, or, with ``content_type=``, a file of
+      data format v1.
+
+    Keyword fields given with ``header=`` override its values.
 
     Parameters
     ----------
@@ -1297,50 +1815,78 @@ def export_dat(
         contiguous-or-not C-order layout is accepted; the data is
         densified on write.
     sample_rate
-        Wire-side sample rate in Hz.
+        Rate of the positions along the fibre in Hz (required without
+        ``header``).
     trig_frequency
-        Trigger pulse rate in Hz, a whole number. The file carries no card
-        rational (header bytes 88..96 are left zero), so a reader times it
-        on this integer: a DAT cannot record a rate that is not a whole
-        number of hertz — the Audace acquisition refuses DAT for such rates
-        and records them in HDF5.
+        Trigger pulse rate in Hz, a whole number (required without
+        ``header``). Without ``header`` the file carries no card rational
+        (header bytes 88..96 are left zero), so a reader times it on this
+        integer: a DAT cannot record a rate that is not a whole number of
+        hertz — the Audace acquisition refuses DAT for such rates and
+        records them in HDF5.
     range_v
         ADC voltage range in volts (stored as mV in the header).
     timestamp
-        Free-form acquisition timestamp (≤ 32 bytes UTF-8).
+        Free-form acquisition timestamp (≤ 32 bytes UTF-8), for a file
+        without ``acquisition_ns``.
     flags
-        Raw header flag mask. The ``FLOAT`` bit is set automatically
-        when ``data.dtype.kind == 'f'``.
+        Raw header flag mask. On a file of content type 0 the ``FLOAT`` bit
+        is set automatically when ``data.dtype.kind == 'f'``; a file of data
+        format v1 keeps only ``AC`` and ``HIZ``.
     pulse_width
         Trigger pulse width in ns.
     num_channels
         Number of active socket channels in the original acquisition.
+    header
+        A :class:`Header` to copy (see above).
+    content_type
+        The content type of the samples (see :mod:`invisensing.content`).
+    card
+        The card code (``"p18"``, ``"p21"``, ``"s125"``, ``"s500"``).
+    acquisition_ns
+        Time of the first line, ns since the Unix epoch (UTC): with
+        ``header=``, the time of the first line written when it is not the
+        source's first (``f.line_time_ns(start)``).
 
     Raises
     ------
     ValueError
-        If ``data`` is not 2-D.
+        If ``data`` is not 2-D, if a required field is missing, or if the
+        data is not of the content type's sample type.
     OSError
         If the write fails.
     """
     if data.ndim != 2:
         raise ValueError(f"data must be 2-D (rows × line_size), got {data.ndim}-D")
-    if data.dtype.kind == "f":
-        flags = flags | FLAG_FLOAT
-    else:
-        flags = flags & ~FLAG_FLOAT
-    header = Header(
-        line_size=int(data.shape[1]),
-        trig_frequency=int(trig_frequency),
-        sample_size=int(data.dtype.itemsize),
-        sample_rate=int(sample_rate),
-        flags=int(flags),
-        range=int(round(range_v * 1000)),
-        pulse_width=int(pulse_width),
-        num_channels=int(num_channels),
-        timestamp=str(timestamp),
-    )
-    bytes_hdr = build_header_bytes(header)
-    with open(path, "wb") as fp:
-        fp.write(bytes_hdr)
-        fp.write(np.ascontiguousarray(data).tobytes())
+    overrides = {
+        "sample_rate": sample_rate,
+        "trig_frequency": trig_frequency,
+        "range": None if range_v is None else int(round(range_v * 1000)),
+        "timestamp": timestamp,
+        "flags": flags,
+        "pulse_width": pulse_width,
+        "num_channels": num_channels,
+        "content_type": content_type,
+        "card": card,
+        "acquisition_ns": acquisition_ns,
+    }
+    overrides = {k: v for k, v in overrides.items() if v is not None}
+    if header is None:
+        if sample_rate is None or trig_frequency is None:
+            raise ValueError("export_dat needs sample_rate and trig_frequency (or header=)")
+        info = _content.info(content_type) if content_type else None
+        want = _SAMPLE_DTYPES.get(info.sample_type) if info is not None else None
+        if want is not None and data.dtype != want:
+            raise ValueError(
+                f"content type {info.tag} ({content_type}) is stored as {want}, "
+                f"but the data is {data.dtype}"
+            )
+        defaults = dict(range=0, timestamp="", flags=0, pulse_width=0, num_channels=1)
+        header = Header(
+            line_size=int(data.shape[1]),
+            sample_size=int(data.dtype.itemsize),
+            **{**defaults, **overrides},
+        )
+    elif overrides:
+        header = _formats.replace_header(header, **overrides)
+    _write_dat(path, _file_header(header, data.dtype, data.shape[1], data.shape[0]), [data])

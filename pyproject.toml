@@ -20,7 +20,6 @@ keywords = [
     "fiber-optic",
     "geophysics",
     "seismic",
-    "PCIe7821",
     "demodulation",
     "audace",
     "hdf5",
@@ -97,13 +96,17 @@ strip         = true
 # Files that should NOT end up in the source distribution. `**`, not `*`:
 # a single `*` stops at the first directory level, and `.github/*` let
 # `.github/workflows/*.yml` through. The tests ship with the small fixtures
-# they read (`tests/assets/*.json`, `*.txt`), so `pytest` runs from the
-# unpacked sdist; the one fixture left out is the 18 MB synthetic capture of
-# the legacy round trip (`tests/test_File.py` skips without it). Cargo.lock
-# ships: the sdist builds with the dependency versions CI tested.
+# they read (`tests/assets/*.json`, `*.txt`, `v1/**`), so `pytest` runs from
+# the unpacked sdist. Left out: the 18 MB synthetic capture of the legacy
+# round trip (`tests/test_File.py` skips without it), and the copy of the
+# acquisition's content-type registry, which spells out the cards' former
+# variant tags (the registry tests skip without it; this package names the
+# cards by their codes only). Cargo.lock ships: the sdist builds with the
+# dependency versions CI tested.
 exclude       = [
     "tests/output/**",
     "tests/assets/demodulated.dat",
+    "tests/assets/content_types_v1.json",
     "target/**",
     "Docs/**",
     ".github/**",

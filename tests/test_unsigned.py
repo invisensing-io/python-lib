@@ -1,14 +1,15 @@
 """
-A single-column ``UNSIGNED`` file reads as unsigned.
+A magnitude column reads as unsigned.
 
 When the FileWriter splits an interleaved arctan/magnitude stream, the
-``magnitude/`` child keeps the ``UNSIGNED`` bit (Audace-Lib
-``header::interleaved_split``: ``DEMODULATED | UNSIGNED``, content type
-``hw_amplitude``) and carries ``√(I²+Q²)`` as ``u16``. Read as ``int16``,
-every magnitude above 32767 came back negative (40000 → −25536). Every
-format must give the same ``uint16`` numbers: the DAT reader, an HDF5
-written with an ``int16`` dataset and ``unsigned = 1`` (every file so far)
-or with a ``uint16`` dataset (newer writers), TDMS and SEG-Y.
+``magnitude/`` child (content type ``hw_amplitude``, 5) carries
+``√(I²+Q²)`` as ``u16``; before data format v1 it also kept the
+``UNSIGNED`` bit (``DEMODULATED | UNSIGNED``), a v1 file writes no flag and
+the content type alone says ``u16``. Read as ``int16``, every magnitude
+above 32767 came back negative (40000 → −25536). Every format must give the
+same ``uint16`` numbers: the DAT reader, an HDF5 written with an ``int16``
+dataset and ``unsigned = 1`` (files before ``u16`` datasets) or with a
+``uint16`` dataset, TDMS and SEG-Y — with or without the flags.
 """
 
 from __future__ import annotations
@@ -37,6 +38,7 @@ MAGNITUDES = np.array(
 ROWS, COLS = MAGNITUDES.shape
 FLAGS = FLAG_DEMODULATED | FLAG_UNSIGNED
 HW_AMPLITUDE = 5
+INTERLEAVED_HW_ARCTAN_AMPLITUDE = 7
 
 
 def _header(flags=FLAGS, line_size=COLS) -> Header:
@@ -92,6 +94,7 @@ def _segy(path: Path) -> Path:
             4: "SAMPLE RATE: 125000000 Hz",
             5: "TRIGGER FREQUENCY: 1000 Hz",
             8: f"SAMPLES PER TRACE: {COLS}",
+            16: f"- CONTENT-TYPE: hw_amplitude ({HW_AMPLITUDE})",
             21: f"HEADER FLAGS (raw bits): 0x{FLAGS:08X}",
         })
     return path
@@ -110,7 +113,11 @@ WRITERS = {
 def test_a_split_magnitude_child_reads_as_uint16(tmp_path, fmt):
     path = WRITERS[fmt](tmp_path)
     with File(path) as f:
-        assert f.mode is Mode.RAW
+        # The content type says what it is (it was classified RAW, and
+        # shown as ADC volts, before the content type was read).
+        assert f.mode is Mode.AMPLITUDE
+        np.testing.assert_array_equal(f.get_magnitude(), MAGNITUDES[:1])
+        f.rewind()
         assert f.is_unsigned and not f.is_interleaved
         assert f.dtype == np.uint16
         data = f.read_all()
@@ -134,15 +141,19 @@ def test_the_dat_reader_returns_uint16_without_the_facade(tmp_path):
     r.close()
 
 
-def test_an_interleaved_arctan_magnitude_file_is_unchanged(tmp_path):
-    """INTERLEAVED | UNSIGNED: the pair stays int16 (the arctan lane is
-    signed); only the magnitude lane is unsigned, through get_magnitude."""
+@pytest.mark.parametrize("content_type", [INTERLEAVED_HW_ARCTAN_AMPLITUDE, 0])
+def test_an_interleaved_arctan_magnitude_file_is_unchanged(tmp_path, content_type):
+    """INTERLEAVED | UNSIGNED pairs (content type 7, or 0 for a file written
+    before the content type existed): the pair stays int16 (the arctan lane
+    is signed); only the magnitude lane is unsigned, through get_magnitude."""
     pair = np.empty((ROWS, 2 * COLS), np.int16)
     arctan = np.array([[-32768, 32767, -1, 0, 5, -5]] * ROWS, np.int16)
     pair[:, 0::2] = arctan
     pair[:, 1::2] = MAGNITUDES.view(np.int16)
     path = tmp_path / "pair.dat"
-    h = _header(flags=FLAGS | FLAG_INTERLEAVED, line_size=2 * COLS)
+    h = Header(line_size=2 * COLS, trig_frequency=1_000, sample_size=2,
+               sample_rate=125_000_000, flags=FLAGS | FLAG_INTERLEAVED, range=1_000,
+               content_type=content_type)
     path.write_bytes(build_header_bytes(h) + pair.tobytes())
     with File(path) as f:
         assert f.mode is Mode.ARCTAN_MAGNITUDE
@@ -151,6 +162,20 @@ def test_an_interleaved_arctan_magnitude_file_is_unchanged(tmp_path):
         assert buf.dtype == np.int16
         np.testing.assert_array_equal(f.get_arctan(buf), arctan)
         np.testing.assert_array_equal(f.get_magnitude(buf), MAGNITUDES)
+
+
+def test_a_v1_magnitude_file_without_flags_reads_as_uint16(tmp_path):
+    """Data format v1 writes no UNSIGNED flag: content type 5 is u16."""
+    path = tmp_path / "v1.dat"
+    h = Header(line_size=COLS, trig_frequency=1_000, sample_size=2, sample_rate=125_000_000,
+               flags=0, range=1_000, content_type=HW_AMPLITUDE, format_version=1)
+    path.write_bytes(build_header_bytes(h) + MAGNITUDES.tobytes())
+    with File(path) as f:
+        assert f.dtype == np.uint16 and f.is_unsigned
+        np.testing.assert_array_equal(f.get_amplitude(n=ROWS), MAGNITUDES)
+        f.rewind()
+        volts = f.get_magnitude_volts(n=ROWS)
+        np.testing.assert_allclose(volts, MAGNITUDES * (1.0 / 32768.0), rtol=1e-6)
 
 
 def test_an_interleaved_hdf5_stored_as_uint16_still_deinterleaves(tmp_path):

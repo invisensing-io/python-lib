@@ -2,8 +2,10 @@
 Invisensing — Python SDK for the Audace DAS environment.
 
 Read acquisition files produced by the Audace FileWriter and extract
-the channel of interest (I, Q, arctan, magnitude, phase) regardless of
-the on-disk format (DAT, HDF5, TDMS, SEG-Y).
+the channel of interest (phase, amplitude, arctan, I, Q, raw samples)
+regardless of the on-disk format (DAT, HDF5, TDMS, SEG-Y). What a file
+holds comes from its content type (``invisensing.content``, Audace data
+format v1); files written before it are read from their header flags.
 
 The hot path (header parsing, bytes → numpy conversion, de-interleave)
 lives in the native ``invisensing._core`` Rust extension. The Python
@@ -16,11 +18,13 @@ The recommended modern usage::
 
     from invisensing import File, Mode
 
-    with File("acquisition.dat") as f:
+    with File("phase/2026-11-03_10-00-00.h5") as f:
         match f.mode:
+            case Mode.PHASE:            phase = f.get_phase()
+            case Mode.AMPLITUDE:        amp   = f.get_amplitude()
+            case Mode.ARCTAN:           rad   = f.get_arctan_radians()
             case Mode.IQ:               i, q  = f.get_i(), f.get_q()
             case Mode.ARCTAN_MAGNITUDE: a, m  = f.get_arctan(), f.get_magnitude()
-            case Mode.PHASE:            phase = f.get_phase()
             case Mode.RAW:              data  = f.read_lines(1000)
 
 The legacy SDK is preserved verbatim::
@@ -39,7 +43,8 @@ API stability
 Everything in :data:`__all__` is **stable** from v1.0.0 onwards.
 Adding new optional arguments, methods, properties, or formats is
 allowed (additive changes); renaming or removing anything in
-:data:`__all__` is not.
+:data:`__all__` is not. (One exception, in 1.4.0: the constant of the
+header bit ``0x020``, never set by any producer, is now ``FLAG_RESERVED``.)
 """
 
 from __future__ import annotations
@@ -60,15 +65,17 @@ from ._reader import (
     FLAG_AC,
     FLAG_HIZ,
     FLAG_SCHUBERT,
-    FLAG_SPECTRUM,
+    FLAG_RESERVED,
     FLAG_MOZART,
     FLAG_PHASE,
     FLAG_INTERLEAVED,
     FLAG_UNSIGNED,
+    FORMAT_VERSION,
     HEADER_SIZE,
     TIME_FLAG_MAP_V1,
     TIME_FLAG_CORRECTED,
 )
+from . import content
 from . import _legacy as _legacy_impl
 
 # Kept in step with pyproject.toml and Cargo.toml by
@@ -88,14 +95,16 @@ __all__ = [
     "FLAG_AC",
     "FLAG_HIZ",
     "FLAG_SCHUBERT",
-    "FLAG_SPECTRUM",
+    "FLAG_RESERVED",
     "FLAG_MOZART",
     "FLAG_PHASE",
     "FLAG_INTERLEAVED",
     "FLAG_UNSIGNED",
+    "FORMAT_VERSION",
     "HEADER_SIZE",
     "TIME_FLAG_MAP_V1",
     "TIME_FLAG_CORRECTED",
+    "content",
     "__version__",
 ]
 

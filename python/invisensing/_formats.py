@@ -42,12 +42,9 @@ from ._core import (
     CONTENT_TYPE_NAMES,
     DatReader,
     Header,
-    FLAG_DEMODULATED,
     FLAG_FLOAT,
-    FLAG_INTERLEAVED,
-    FLAG_UNSIGNED,
-    FLAG_PHASE,
     TIME_FLAG_CORRECTED,
+    card_code,
 )
 
 
@@ -60,25 +57,49 @@ _CLOSED_MSG = "operation on a closed file"
 _CONTENT_TYPE_BY_NAME = {name: value for value, name in CONTENT_TYPE_NAMES.items()}
 
 
+#: Every field of :class:`Header`, in constructor order.
+HEADER_FIELDS = (
+    "line_size", "trig_frequency", "sample_size", "sample_rate", "flags",
+    "range", "pulse_width", "num_channels", "timestamp", "content_type",
+    "acquisition_ns", "trigger_delay", "trig_clock_hz", "trig_period_ticks",
+    "line_offset", "time_flags", "card", "duration_s", "format_version",
+    "spatial_step_m", "temporal_step_s",
+)
+
+
+def replace_header(h: Header, **changes) -> Header:
+    """A copy of ``h`` with ``changes`` applied (``Header`` is immutable)."""
+    unknown = set(changes) - set(HEADER_FIELDS)
+    if unknown:
+        raise TypeError(f"unknown Header field(s): {sorted(unknown)}")
+    fields = {name: getattr(h, name) for name in HEADER_FIELDS}
+    fields.update(changes)
+    return Header(**fields)
+
+
 def wire_dtype(h: Header) -> np.dtype:
     """The numpy dtype :meth:`read_lines` returns for a file of header ``h``
-    — the native DAT reader's rule, which every backend follows:
+    — the native DAT reader's rule (``Header.sample_encoding``), which every
+    backend follows:
 
-    * ``FLOAT``: ``float32`` / ``float64`` (4 / 8 bytes);
-    * 1 byte: ``uint8``;
-    * a single column (not ``INTERLEAVED``) with ``UNSIGNED``: the unsigned
-      integer of ``sample_size`` (``uint16`` for the ``magnitude/`` child of
-      a split arctan/magnitude stream);
-    * otherwise the signed integer of ``sample_size`` (an INTERLEAVED pair
-      stays ``int16``: its UNSIGNED lane is reinterpreted by
-      :meth:`File.get_magnitude`).
+    * the content type's sample type when it fixes one: ``int16``,
+      ``uint16`` (5, 25: a magnitude, a script's ``u16``) or ``float32`` —
+      a v1 file carries no FLOAT / UNSIGNED flag;
+    * content type 0, 12, an unknown value, or a ``sample_size`` the
+      content type contradicts — the flags, exactly as before: ``FLOAT``:
+      ``float32`` / ``float64``; a single column with ``UNSIGNED``: the
+      unsigned integer of ``sample_size``; otherwise the signed integer;
+    * 1 byte: ``uint8``.
+
+    An interleaved pair stays signed: the ``u16`` magnitude lane of an
+    arctan/magnitude pair is reinterpreted by :meth:`File.get_magnitude`.
     """
-    size = h.sample_size
-    if h.is_float and size in (4, 8):
+    size, is_float, unsigned = h.sample_encoding
+    if is_float and size in (4, 8):
         return np.dtype(f"float{size * 8}")
     if size == 1:
         return np.dtype("uint8")
-    if h.is_unsigned and not h.is_interleaved and not h.is_float:
+    if unsigned:
         return np.dtype(f"uint{size * 8}")
     return np.dtype(f"int{size * 8}")
 
@@ -99,6 +120,22 @@ def _as_wire_dtype(arr: np.ndarray, h: Header) -> np.ndarray:
     ):
         return arr.view(want)
     return arr
+
+
+def _card(value) -> Optional[str]:
+    """The card code a file's ``card`` attribute / property / text line
+    stands for (a tag written before data format v1 is mapped), or
+    ``None``."""
+    if isinstance(value, bytes):
+        value = value.decode("ascii", errors="replace")
+    if not isinstance(value, str):
+        return None
+    return card_code(value.strip())
+
+
+def _step(value: Optional[float]) -> float:
+    """A step attribute: finite and positive, else ``0.0`` (absent)."""
+    return value if value is not None else 0.0
 
 
 def _content_type(number: Optional[int], name: Optional[str]) -> int:
@@ -213,10 +250,12 @@ class _DatBackend:
 
 # ── HDF5 — via h5py ────────────────────────────────────────────────────────
 #
-# Audace HDF5 files store the samples as a (num_traces,
-# samples_per_trace) dataset named ``acoustic_data``, typed by
-# ``bytes_per_sample`` + the ``FLOAT`` attribute. All header fields are
-# mirrored as scalar attributes. Only the metadata is read at
+# Audace HDF5 files (``.h5`` since data format v1, ``.hdf5`` before) store
+# the samples as a (num_traces, samples_per_trace) dataset named
+# ``acoustic_data``, typed by the content type (``int16``, ``uint16`` or
+# ``float32``; for content type 0 and 12, by ``sample_size`` and the
+# ``FLOAT`` / ``UNSIGNED`` flags). All header fields are mirrored as scalar
+# attributes. Only the metadata is read at
 # construction; the samples are fetched per ``read_lines`` slice, so a
 # multi-GB capture does not have to fit in RAM. Each slice is a fresh,
 # owning numpy array — h5py materialises it on the spot — so closing
@@ -495,6 +534,14 @@ class _Hdf5Backend:
             # What the acquisition library reads back for such a file: its
             # start time is the corrected one (kept through a DAT export).
             time_flags=TIME_FLAG_CORRECTED if corrected else 0,
+            # Data format v1 (absent — 0, unknown — on every older file): the
+            # card code, the version, the duration of the traces written and
+            # the steps, stored as f64 (exact).
+            card=_card(_str_attr(attrs, "card")),
+            format_version=_int_attr(attrs, "format_version", 0, 0xFF),
+            duration_s=_int_attr(attrs, "duration_s", 0, _U32_MAX),
+            spatial_step_m=_step(_positive_float_attr(attrs, "spatial_step_m")),
+            temporal_step_s=_step(_positive_float_attr(attrs, "temporal_step_s")),
         )
         # `clock / ticks` as a float, for MATLAB / HDFView users. Normally
         # redundant with the rational above (same writer, same value); kept
@@ -505,6 +552,9 @@ class _Hdf5Backend:
         # The writer's tag of the content type: what names a value this SDK
         # does not know (a newer producer).
         self.content_type_name_attr = _str_attr(attrs, "content_type_name")
+        # An archive export (zone variances, content type 27 or 28): the
+        # content type of the column the variance was computed from.
+        self.source_content_type = _opt_int_attr(attrs, "source_content_type")
         # ZSTD_LOSSY_1E4: every phase sample was rounded to a multiple of the
         # step, at most the error away from what was acquired (Audace-Lib
         # `write_hdf5_attrs`). Absent = the samples are exact.
@@ -544,12 +594,12 @@ class _Hdf5Backend:
         n = min(n, self.lines_left)
         out = np.asarray(dataset[self._cursor : self._cursor + n])
         self._cursor += n
-        # h5py returns the dataset dtype as-is, which matches
-        # (sample_size, FLOAT) — the Audace HDF5 writer types it that way.
-        # The one reinterpretation: a single-column UNSIGNED file (the
-        # `magnitude/` child of a split arctan/magnitude stream) is read as
-        # unsigned whether the writer stored `int16` + `unsigned = 1` (every
-        # file before u16 datasets) or `uint16` — the same bits either way.
+        # h5py returns the dataset dtype as-is, which matches the header's
+        # sample encoding — the Audace HDF5 writer types it that way. The one
+        # reinterpretation: an unsigned column (the `magnitude/` child of a
+        # split arctan/magnitude stream) is read as unsigned whether the
+        # writer stored `int16` + `unsigned = 1` (every file before u16
+        # datasets) or `uint16` — the same bits either way.
         return _as_wire_dtype(out, self._header)
 
     def rewind(self) -> None:
@@ -587,13 +637,14 @@ class _Hdf5Backend:
 
 # ── TDMS — via npTDMS ──────────────────────────────────────────────────────
 #
-# Audace TDMS files write a single channel ``acoustic_data`` under the
-# group ``AudaceGroup``. All header fields travel as file-level
-# properties.
+# Audace TDMS files write a single channel ``acoustic_data`` (lines
+# flattened row-major) under one group — ``Audace`` for the files of data
+# format v1, ``AudaceGroup`` in older ones. All header fields travel as
+# file-level properties.
 
 
 class _TdmsBackend:
-    GROUP_NAME = "AudaceGroup"
+    GROUP_NAMES = ("Audace", "AudaceGroup")
     CHANNEL_NAME = "acoustic_data"
 
     def __init__(self, path: Path):
@@ -627,6 +678,17 @@ class _TdmsBackend:
                 _opt_int_attr(props, "content_type"),
                 _str_attr(props, "content_type_name"),
             ),
+            # Written by the data format v1 writer (absent before): the exact
+            # anchor, the card's rational when the frequency is exact, the
+            # card code, the version, the duration and the steps.
+            acquisition_ns=_int_attr(props, "timestamp_ns", 1, _I64_MAX),
+            trig_clock_hz=_int_attr(props, "trig_clock_hz", 0, _U32_MAX),
+            trig_period_ticks=_int_attr(props, "trig_period_ticks", 0, _U32_MAX),
+            card=_card(_str_attr(props, "card")),
+            format_version=_int_attr(props, "format_version", 0, 0xFF),
+            duration_s=_int_attr(props, "duration_s", 0, _U32_MAX),
+            spatial_step_m=_step(_positive_float_attr(props, "spatial_step_m")),
+            temporal_step_s=_step(_positive_float_attr(props, "temporal_step_s")),
         )
         # The writer's tag, which names a value this SDK does not know.
         self.content_type_name_attr = _str_attr(props, "content_type_name")
@@ -636,11 +698,14 @@ class _TdmsBackend:
         self._cursor = 0
 
     def _find_channel(self):
-        """Locate `acoustic_data` whichever group nptdms reports."""
-        groups = self._tdms.groups()
-        group = next((g for g in groups if g.name == self.GROUP_NAME), groups[0])
-        channels = group.channels()
-        return next((c for c in channels if c.name == self.CHANNEL_NAME), channels[0])
+        """Locate `acoustic_data` in whichever group holds it (the Audace
+        groups first), else the first channel of the first group."""
+        groups = sorted(self._tdms.groups(), key=lambda g: g.name not in self.GROUP_NAMES)
+        for group in groups:
+            for channel in group.channels():
+                if channel.name == self.CHANNEL_NAME:
+                    return channel
+        return groups[0].channels()[0]
 
     def _require_open(self):
         channel = getattr(self, "_channel", None)
@@ -675,8 +740,9 @@ class _TdmsBackend:
         # memory we own — closing the file cannot invalidate it.
         flat = np.asarray(channel.read_data(offset, length))
         self._cursor += n
-        # The TDMS channel is `int16` for every 2-byte file: a single-column
-        # UNSIGNED one is reinterpreted as `uint16`, like the DAT reader.
+        # The TDMS channel of an older file is `int16` for every 2-byte file:
+        # an unsigned column is reinterpreted as `uint16`, like the DAT
+        # reader (the v1 writer stores `uint16` already).
         return _as_wire_dtype(
             flat[: n * self._line_size].reshape(n, self._line_size), self._header
         )
@@ -711,13 +777,105 @@ class _TdmsBackend:
 
 # ── SEG-Y — via segyio ─────────────────────────────────────────────────────
 #
-# Audace SEG-Y files write one trace per fibre position, with
-# ``samples_per_trace = line_size`` (wire-side, doubled in INTERLEAVED).
-# Header fields that aren't expressible in the SEG-Y binary header are
-# encoded as discrete lines in the EBCDIC textual header — e.g.
-# ``C21 HEADER FLAGS (raw bits): 0xNNNNNNNN``, ``C4 SAMPLE RATE: NNN Hz``.
-# We parse those back into a ``Header`` so the channel extractors keep
-# working.
+# Audace SEG-Y files write one trace per line (trigger), whose samples run
+# along the fibre: ``samples_per_trace = line_size``. Header fields that the
+# SEG-Y binary header cannot hold are written as ``KEY: value`` lines of the
+# 3200-byte textual header — ``C 4 SAMPLE RATE: NNN Hz``, ``C16 -
+# CONTENT-TYPE: dui_coherent_phase (19)``, ``C21 HEADER FLAGS (raw bits):
+# 0xNNNNNNNN``… — and parsed back into a ``Header`` here.
+#
+# The textual header is read from the file's first 3200 bytes, not through
+# segyio: segyio converts it from EBCDIC unconditionally, and the Audace
+# writers write it in ASCII (an ASCII header came back as garbage, every
+# field lost and every float sample read as an integer). Both encodings are
+# accepted: a first byte ``C`` is ASCII, ``0xC3`` is EBCDIC ``C``; anything
+# else is read as ASCII, with a warning.
+
+
+#: The textual header: 40 lines of 80 characters.
+_SEGY_TEXT_LEN = 3200
+
+
+def _decode_segy_text(raw: bytes) -> str:
+    """The textual header as text, whichever encoding it was written in
+    (ASCII, or EBCDIC code page 037); unprintable bytes become spaces."""
+    first = raw[:1]
+    if first == b"C":
+        text = raw.decode("ascii", errors="replace")
+    elif first == b"\xc3":
+        text = raw.decode("cp037", errors="replace")
+    else:
+        warnings.warn(
+            "SEG-Y textual header starts with neither ASCII nor EBCDIC 'C' "
+            f"(first byte {raw[:1]!r}): read as ASCII",
+            stacklevel=3,
+        )
+        text = raw.decode("ascii", errors="replace")
+    return "".join(c if c.isprintable() and c.isascii() else " " for c in text)
+
+
+def _segy_text_fields(text: str) -> dict:
+    """``{KEY: value}`` of the textual header's ``Cnn KEY: value`` lines: the
+    ``Cnn`` prefix and a leading ``- `` removed, keys upper-case and
+    trimmed (a later line wins). Lines without a colon (the notes) are not
+    fields."""
+    out = {}
+    for line in _split_segy_lines(text):
+        body = line[4:].strip()
+        if body.startswith("- "):
+            body = body[2:]
+        key, sep, value = body.partition(":")
+        if sep:
+            out[key.strip().upper()] = value.strip()
+    return out
+
+
+def _leading_int(value: Optional[str], base: int = 10) -> Optional[int]:
+    """The integer a value starts with (``"2000 Hz"`` → 2000, ``"-3"`` →
+    -3; ``base=16`` reads ``"0x00000021"``), or ``None``."""
+    if not value:
+        return None
+    v = value.strip()
+    if base == 16:
+        if v[:2].lower() != "0x":
+            return None
+        digits = ""
+        for ch in v[2:]:
+            if ch not in "0123456789abcdefABCDEF":
+                break
+            digits += ch
+        return int(digits, 16) if digits else None
+    end = 0
+    while end < len(v) and (v[end].isdigit() or (end == 0 and v[end] == "-")):
+        end += 1
+    try:
+        return int(v[:end])
+    except ValueError:
+        return None
+
+
+def _leading_float(value: Optional[str]) -> Optional[float]:
+    """The number a value starts with (``"0.4 METERS"`` → 0.4), or ``None``."""
+    if not value or not value.split():
+        return None
+    try:
+        return float(value.split()[0])
+    except ValueError:
+        return None
+
+
+def _segy_content_type(value: Optional[str]) -> int:
+    """``<tag> (<value>)`` since data format v1, ``<tag>`` alone before: the
+    number when there is one, else the value of a known tag, else 0."""
+    if not value:
+        return 0
+    head, sep, rest = value.partition("(")
+    if sep:
+        n = _leading_int(rest)
+        if n is not None and 0 <= n <= 0xFF:
+            return n
+    tag = head.split()[0] if head.split() else ""
+    return _CONTENT_TYPE_BY_NAME.get(tag, 0)
 
 
 class _SegyBackend:
@@ -730,34 +888,28 @@ class _SegyBackend:
                 "`pip install invisensing`. If you installed with --no-deps, "
                 "run `pip install segyio` (or `pip install invisensing[segy]`)."
             ) from exc
+        with open(path, "rb") as fp:
+            raw_text = fp.read(_SEGY_TEXT_LEN)
+        fields = _segy_text_fields(_decode_segy_text(raw_text))
         # `ignore_geometry=True` skips the inline/crossline scan — our
         # files are arbitrary trace lists, not 3-D survey volumes.
         self._segy = segyio.open(str(path), ignore_geometry=True)
-        text = self._segy.text[0].decode("ascii", errors="replace")
 
-        flags = _scan_segy_text_int(text, "HEADER FLAGS", base=16)
-        sample_rate = _scan_segy_text_int(text, "SAMPLE RATE")
-        trig_freq = _scan_segy_text_int(text, "TRIGGER FREQUENCY")
-        pulse_width = _scan_segy_text_int(text, "PULSE WIDTH")
-        trigger_delay = _scan_segy_text_int(text, "TRIGGER DELAY")
-        voltage_mv = _scan_segy_text_int(text, "VOLTAGE RANGE")
-        samples_per_trace = _scan_segy_text_int(text, "SAMPLES PER TRACE")
-        timestamp = _scan_segy_text_str(text, "TIMESTAMP")
-
-        # bytes per sample comes from segyio's format code. Enum member
-        # names follow segyio's SEG-Y revision wording (SIGNED_*_BYTE).
-        fmt_to_bytes = {
-            int(segyio.SegySampleFormat.SIGNED_CHAR_1_BYTE): 1,
-            int(segyio.SegySampleFormat.UNSIGNED_CHAR_1_BYTE): 1,
-            int(segyio.SegySampleFormat.SIGNED_SHORT_2_BYTE): 2,
-            int(segyio.SegySampleFormat.UNSIGNED_SHORT_2_BYTE): 2,
-            int(segyio.SegySampleFormat.SIGNED_INTEGER_4_BYTE): 4,
-            int(segyio.SegySampleFormat.UNSIGNED_INTEGER_4_BYTE): 4,
-            int(segyio.SegySampleFormat.SIGNED_INTEGER_8_BYTE): 8,
-            int(segyio.SegySampleFormat.UNSIGNED_INTEGER_8_BYTE): 8,
-            int(segyio.SegySampleFormat.IEEE_FLOAT_4_BYTE): 4,
-            int(segyio.SegySampleFormat.IEEE_FLOAT_8_BYTE): 8,
-            int(segyio.SegySampleFormat.IBM_FLOAT_4_BYTE): 4,
+        # Bytes per sample and float-ness come from segyio's format code.
+        # Enum member names follow segyio's SEG-Y revision wording.
+        fmt = segyio.SegySampleFormat
+        fmt_to_storage = {
+            int(fmt.SIGNED_CHAR_1_BYTE): (1, False),
+            int(fmt.UNSIGNED_CHAR_1_BYTE): (1, False),
+            int(fmt.SIGNED_SHORT_2_BYTE): (2, False),
+            int(fmt.UNSIGNED_SHORT_2_BYTE): (2, False),
+            int(fmt.SIGNED_INTEGER_4_BYTE): (4, False),
+            int(fmt.UNSIGNED_INTEGER_4_BYTE): (4, False),
+            int(fmt.SIGNED_INTEGER_8_BYTE): (8, False),
+            int(fmt.UNSIGNED_INTEGER_8_BYTE): (8, False),
+            int(fmt.IEEE_FLOAT_4_BYTE): (4, True),
+            int(fmt.IEEE_FLOAT_8_BYTE): (8, True),
+            int(fmt.IBM_FLOAT_4_BYTE): (4, True),
         }
         # `SegyFile.format` is an object that converts to the numeric code
         # (segyio 1.9); looking it up as-is never matched, and every
@@ -766,27 +918,58 @@ class _SegyBackend:
             fmt_code = int(self._segy.format)
         except (TypeError, ValueError):
             fmt_code = None
-        sample_size = fmt_to_bytes.get(fmt_code, 4)
+        sample_size, stored_float = fmt_to_storage.get(fmt_code, (4, False))
+        # u16 samples are stored as 4-byte integers (format code 2) and the
+        # text says `BYTES PER SAMPLE: 2`: narrowed back to the 2-byte layout.
+        if not stored_float and sample_size == 4 and _leading_int(fields.get("BYTES PER SAMPLE")) == 2:
+            sample_size = 2
 
-        # Sanity: when the textual lookup fails, fall back to the binary
-        # header / segyio's geometry so we still return a usable Header.
+        samples_per_trace = _leading_int(fields.get("SAMPLES PER TRACE"))
         if samples_per_trace is None:
             samples_per_trace = self._segy.samples.size
+        sample_rate = _leading_int(fields.get("SAMPLE RATE"))
         if sample_rate is None and len(self._segy.samples) > 1:
             dt_s = float(self._segy.samples[1] - self._segy.samples[0])
             sample_rate = int(round(1.0 / dt_s)) if dt_s > 0 else 0
+        flags = _leading_int(fields.get("HEADER FLAGS (RAW BITS)"), base=16)
+        if flags is None:
+            # A file without the flags line: the format code is the only
+            # description of the samples, as before.
+            flags = FLAG_FLOAT if stored_float else 0
+        # The raw bits of an i32: a top bit set reads as negative.
+        flags = int(flags) & 0xFFFF_FFFF
+        if flags >= 1 << 31:
+            flags -= 1 << 32
+        acquisition_ns = _leading_int(fields.get("TIMESTAMP NS")) or 0
+        if not 0 < acquisition_ns <= _I64_MAX:
+            acquisition_ns = 0
+
+        def u32(key: str) -> int:
+            v = _leading_int(fields.get(key))
+            return v if v is not None and 0 <= v <= _U32_MAX else 0
+
+        def step(key: str) -> float:
+            v = _leading_float(fields.get(key))
+            return v if v is not None and np.isfinite(v) and v > 0 else 0.0
 
         self._header = Header(
             line_size=int(samples_per_trace),
-            trig_frequency=int(trig_freq or 0),
+            trig_frequency=int(_leading_int(fields.get("TRIGGER FREQUENCY")) or 0),
             sample_size=int(sample_size),
             sample_rate=int(sample_rate or 0),
-            flags=int(flags or 0),
-            range=int(voltage_mv or 0),
-            pulse_width=int(pulse_width or 0),
+            flags=flags,
+            range=int(_leading_int(fields.get("VOLTAGE RANGE")) or 0),
+            pulse_width=int(_leading_int(fields.get("PULSE WIDTH")) or 0),
             num_channels=1,
-            timestamp=timestamp or "",
-            trigger_delay=int(trigger_delay or 0),
+            timestamp=fields.get("TIMESTAMP") or "",
+            content_type=_segy_content_type(fields.get("CONTENT-TYPE")),
+            acquisition_ns=acquisition_ns,
+            trigger_delay=u32("TRIGGER DELAY"),
+            card=_card(fields.get("CARD")),
+            format_version=min(u32("FORMAT VERSION"), 0xFF),
+            duration_s=u32("DURATION"),
+            spatial_step_m=step("SAMPLE SPACING ALONG THE FIBER"),
+            temporal_step_s=step("TRACE SPACING IN TIME"),
         )
 
         # Traces are read lazily, one chunk per `read_lines`, via segyio's
@@ -828,8 +1011,8 @@ class _SegyBackend:
         # tests/test_close.py: the array survives `close()` unchanged.
         block = np.asarray(self._segy.trace.raw[self._cursor : self._cursor + n])
         self._cursor += n
-        if not self._header.is_float and self._sample_size in (2, 4, 8):
-            want = wire_dtype(self._header)
+        want = wire_dtype(self._header)
+        if want.kind in "iu" and self._sample_size in (2, 4, 8):
             if want.kind == "u":
                 # Through int64 (exact for every 2- and 4-byte code), then
                 # modular: a u16 magnitude written with a signed format code
@@ -865,76 +1048,9 @@ class _SegyBackend:
             pass
 
 
-# ── SEG-Y textual-header scanners ──────────────────────────────────────────
-
-
-def _scan_segy_text_int(text: str, marker: str, base: int = 10) -> Optional[int]:
-    """
-    Find the first line containing ``marker`` and parse the first
-    integer token after the marker. ``base=16`` recognises ``0xNN``
-    notation. Returns ``None`` if the marker / digits are not found —
-    callers fall back to defaults rather than raising.
-    """
-    for line in _split_segy_lines(text):
-        idx = line.find(marker)
-        if idx < 0:
-            continue
-        rest = line[idx + len(marker):]
-        if base == 16:
-            # The writer emits ``0x{:08X}`` — anchor on the ``0x`` prefix.
-            # Grabbing the first loose hex-letter run instead would parse
-            # prose around the value (e.g. the ``a`` of "(raw bits)") and
-            # return garbage flags for every SEG-Y produced by Filewriter.
-            pos = rest.find("0x")
-            if pos < 0:
-                pos = rest.find("0X")
-            if pos < 0:
-                continue
-            token = ""
-            for ch in rest[pos + 2:]:
-                if ch in "0123456789abcdefABCDEF":
-                    token += ch
-                else:
-                    break
-            if not token:
-                continue
-            try:
-                return int(token, 16)
-            except ValueError:
-                continue
-        else:
-            # base 10: first run of decimal digits after the marker.
-            token = ""
-            in_token = False
-            for ch in rest:
-                if ch.isdigit():
-                    token += ch
-                    in_token = True
-                elif in_token:
-                    break
-            if not token:
-                continue
-            try:
-                return int(token, base)
-            except ValueError:
-                continue
-    return None
-
-
-def _scan_segy_text_str(text: str, marker: str) -> Optional[str]:
-    for line in _split_segy_lines(text):
-        idx = line.find(marker)
-        if idx < 0:
-            continue
-        # Skip the marker and any "  :  " separator.
-        rest = line[idx + len(marker):].lstrip(": ").rstrip()
-        return rest or None
-    return None
-
-
 def _split_segy_lines(text: str):
-    # The textual header is 40 lines × 80 chars, but segyio may return it
-    # without explicit newlines. Split fixed-width to be safe.
+    # The textual header is 40 lines × 80 chars, usually without newlines.
+    # Split fixed-width unless the text carries explicit newlines.
     if "\n" in text:
         return text.split("\n")
     return [text[i : i + 80] for i in range(0, len(text), 80)]

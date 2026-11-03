@@ -12,6 +12,12 @@
 //! - [`time_axis_ns`]: the time of a run of lines on a file's time axis
 //!   (the card's time map, HDF5 `time_map_*` attributes) — exact integers,
 //!   the ones the acquisition stamped.
+//! - The `content_type` registry of the Audace data format v1 and the card
+//!   codes ([`content`]), exported as `CONTENT_TYPES`, `CARD_CODES` and
+//!   [`card_code`]: a file's content type is what fixes the sample type of a
+//!   v1 file (its FLOAT / UNSIGNED / INTERLEAVED flags are written 0);
+//!   content type 0 (files written before the byte existed) keeps the
+//!   flag-based reading.
 //! - De-interleave kernels [`split_pair_i16_primary`],
 //!   [`split_pair_i16_secondary`], [`split_pair_unsigned`],
 //!   [`split_pair_to_complex_i16`], [`split_pair_f32_primary`],
@@ -42,13 +48,17 @@ use numpy::{
 use pyo3::{
     exceptions::{PyIOError, PyMemoryError, PyValueError},
     prelude::*,
-    types::{PyBytes, PyDict},
+    types::{PyBytes, PyDict, PyList},
 };
 use std::{
     fs::File,
     io::{BufReader, Read, Seek, SeekFrom},
     path::PathBuf,
 };
+
+mod content;
+
+use content::SampleType;
 
 // ── Wire format constants ───────────────────────────────────────────────────
 //
@@ -71,9 +81,10 @@ mod offsets {
     pub const PULSE_WIDTH: usize = 56;
     pub const NUM_CHANNELS: usize = 60;
     pub const CONTENT_TYPE: usize = 64; // u8 (carved out of the old reserved region)
-    /// The acquisition card's tag (`pcie7818`, `pcie7821`…), ASCII,
-    /// NUL-padded, 16 bytes (65..81): stamped by CardControl only when the
-    /// card runs as one of two cards (dual-card runs), all zero otherwise.
+    /// The code of the card that produced the data (`p18`, `p21`, `s125`,
+    /// `s500`), ASCII, NUL-padded, 16 bytes (65..81): stamped on every run
+    /// since data format v1. Before v1 the slot held a variant tag on
+    /// two-card runs only, all zero otherwise (see [`crate::content::card_code`]).
     pub const CARD_TAG: usize = 65;
     pub const CARD_TAG_LEN: usize = 16;
     /// u32 LE metres of fibre, carved out of the reserved region past the
@@ -94,7 +105,44 @@ mod offsets {
     pub const LINE_OFFSET: usize = 96;
     /// u32 LE bit set, see [`time_flag_bits`]. Zero on older captures.
     pub const TIME_FLAGS: usize = 100;
+    /// Data format v1 (zero = absent on every older capture): u32 LE, the
+    /// file's duration in whole seconds, rounded down, written at close.
+    pub const DURATION_S: usize = 104;
+    /// u8: 1 for a header of data format v1, 0 before.
+    pub const FORMAT_VERSION: usize = 108;
+    /// f32 LE: metres of fibre between two adjacent positions (columns).
+    pub const SPATIAL_STEP_M: usize = 112;
+    /// f32 LE: seconds between two lines.
+    pub const TEMPORAL_STEP_S: usize = 116;
 }
+
+/// The data format version this SDK reads in full.
+const FORMAT_VERSION: u8 = 1;
+
+/// The header layout, as `(name, offset, size, type)`: what
+/// `tests/test_content_type.py` compares with the producer's registry.
+const HEADER_LAYOUT: [(&str, usize, usize, &str); 20] = [
+    ("timestamp", offsets::TIMESTAMP, 32, "bytes"),
+    ("line_size", offsets::LINE_SIZE, 4, "i32"),
+    ("trig_frequency", offsets::TRIG_FREQUENCY, 4, "i32"),
+    ("sample_size", offsets::SAMPLE_SIZE, 4, "i32"),
+    ("sample_rate", offsets::SAMPLE_RATE, 4, "i32"),
+    ("flags", offsets::FLAGS, 4, "i32"),
+    ("range", offsets::RANGE, 4, "i32"),
+    ("pulse_width", offsets::PULSE_WIDTH, 4, "i32"),
+    ("num_channels", offsets::NUM_CHANNELS, 4, "i32"),
+    ("content_type", offsets::CONTENT_TYPE, 1, "u8"),
+    ("card", offsets::CARD_TAG, offsets::CARD_TAG_LEN, "ascii"),
+    ("trigger_delay", offsets::TRIGGER_DELAY, 4, "u32"),
+    ("trig_clock_hz", offsets::TRIG_CLOCK_HZ, 4, "u32"),
+    ("trig_period_ticks", offsets::TRIG_PERIOD_TICKS, 4, "u32"),
+    ("line_offset", offsets::LINE_OFFSET, 4, "i32"),
+    ("time_flags", offsets::TIME_FLAGS, 4, "u32"),
+    ("duration_s", offsets::DURATION_S, 4, "u32"),
+    ("format_version", offsets::FORMAT_VERSION, 1, "u8"),
+    ("spatial_step_m", offsets::SPATIAL_STEP_M, 4, "f32"),
+    ("temporal_step_s", offsets::TEMPORAL_STEP_S, 4, "f32"),
+];
 
 /// Bits of the header's `time_flags` (bytes 100..104) — must match the
 /// Audace wire-format `header::time_flags`.
@@ -160,38 +208,12 @@ fn rational_lines_to_ns(clock_hz: u32, period_ticks: u32, lines: u64) -> i64 {
     ns.min(i64::MAX as u128) as i64
 }
 
-/// Lowercase tag of a `content_type` byte this SDK knows — the
-/// `as_tag()` of the producer's `audace::types::ContentType` (Audace-Lib
-/// `src/types.rs`; `tests/test_content_type.py` checks the table against
-/// it when that tree sits next to this one). `None` for a value the SDK
-/// does not know (a newer producer).
+/// Lowercase tag of a `content_type` byte this SDK knows — the registry's
+/// (see [`content`]). `None` for a value the SDK does not know (a newer
+/// producer).
 pub fn known_content_type_tag(v: u8) -> Option<&'static str> {
-    Some(match v {
-        // A capture written before the byte existed: byte 64 sat in the
-        // all-zero reserved region.
-        0 => "undefined",
-        1 => "raw",
-        2 => "hw_phase",
-        3 => "hw_arctan",
-        4 => "hw_arctan_dui",
-        5 => "hw_amplitude",
-        6 => "interleaved_hw_iq",
-        7 => "interleaved_hw_arctan_amplitude",
-        8 => "interleaved_hw_phase_amplitude",
-        9 => "sw_mozart",
-        10 => "sw_phase",
-        11 => "sw_amplitude",
-        12 => "sw_custom",
-        13 => "hw_i",
-        14 => "hw_q",
-        _ => return None,
-    })
+    content::info(v).map(|i| i.tag)
 }
-
-/// The `content_type` value of the GPU Mozart software phase (`sw_mozart`).
-pub const CONTENT_TYPE_SW_MOZART: u8 = 9;
-/// The `content_type` value of a raw ADC stream (`raw`).
-pub const CONTENT_TYPE_RAW: u8 = 1;
 
 /// Lowercase tag for a `content_type` byte: [`known_content_type_tag`], or
 /// `unknown(<n>)` for a value this SDK does not know. Never `"undefined"`
@@ -204,20 +226,6 @@ pub fn content_type_tag(v: u8) -> String {
     }
 }
 
-/// The card tag of a header's bytes 65..81, as Audace-Lib's
-/// `header::card_tag` reads it: up to the first NUL, `None` when empty (a
-/// single-card run, a legacy all-zero region) or not `[A-Za-z0-9._-]+` (a
-/// producer that used those bytes for something else).
-fn parse_card_tag(slot: &[u8]) -> Option<String> {
-    let end = slot.iter().position(|&b| b == 0).unwrap_or(slot.len());
-    let s = &slot[..end];
-    let ok = !s.is_empty()
-        && s
-            .iter()
-            .all(|&b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'));
-    ok.then(|| String::from_utf8_lossy(s).into_owned())
-}
-
 /// Flag bits — must match the Audace wire-format `header_flags`
 /// specification. Producer files (Cardcontrol, FileWriter) use the
 /// exact same numeric values.
@@ -227,7 +235,8 @@ pub mod flag_bits {
     pub const AC: i32 = 0x004;
     pub const HIZ: i32 = 0x008;
     pub const SCHUBERT: i32 = 0x010;
-    pub const SPECTRUM: i32 = 0x020;
+    /// Reserved: never set by any producer, written 0 in v1 files.
+    pub const RESERVED: i32 = 0x020;
     pub const MOZART: i32 = 0x040;
     pub const PHASE: i32 = 0x080;
     pub const INTERLEAVED: i32 = 0x100;
@@ -249,6 +258,14 @@ fn read_u32_le(buf: &[u8], offset: usize) -> u32 {
 /// Exposed as `invisensing._core.Header`. The HDF5 / TDMS / SEG-Y wrappers
 /// reconstruct one of these from format-native metadata so the channel
 /// extractors take a single uniform path.
+///
+/// The fields are the header as stored. The `is_*` predicates, the
+/// positions and the sample encoding follow the **content type** when it
+/// fixes them (data format v1: a v1 file writes its FLOAT, UNSIGNED,
+/// INTERLEAVED, DEMODULATED and PHASE flags as 0); for content type 0 (a
+/// capture written before the byte existed), an unassigned value or a
+/// `sample_size` the content type contradicts, they follow the flags
+/// exactly as before.
 #[pyclass(get_all, module = "invisensing._core")]
 #[derive(Clone, Debug)]
 pub struct Header {
@@ -265,10 +282,12 @@ pub struct Header {
     /// are. `0` = Undefined (a capture written before the byte existed).
     /// Use `content_type_name` for the lowercase tag.
     pub content_type: u8,
-    /// The acquisition card's tag (DataHeader bytes 65..81, e.g.
-    /// `"pcie7818"`), or `None`. CardControl stamps it only on a dual-card
-    /// run (one card of two); `None` on a single-card run, on older captures
-    /// and on the formats that do not carry it (HDF5, TDMS, SEG-Y).
+    /// The code of the card that produced the data — `"p18"`, `"p21"`,
+    /// `"s125"` or `"s500"` — or `None` when the file does not say (an older
+    /// single-card capture, a file converted without it). Stamped on every
+    /// run since data format v1 (DAT bytes 65..81, HDF5 / TDMS `card`, SEG-Y
+    /// `CARD:` line); the tag a two-card run wrote there before v1 reads as
+    /// its code.
     pub card: Option<String>,
     /// Precise acquisition time in i64 nanoseconds (DataHeader timestamp bytes
     /// [0..8]). `0` when the file uses the legacy ASCII timestamp string.
@@ -299,7 +318,28 @@ pub struct Header {
     /// `time_correction` attribute is `"cardclock-v1"`. `0` on older files,
     /// and always `0` for TDMS and SEG-Y, which carry no time flags.
     pub time_flags: u32,
+    /// Data format v1 — duration of the file in whole seconds, rounded down,
+    /// written when the file was closed (DAT bytes 104..108, attribute
+    /// `duration_s`). `0` = unknown: a file written before v1, a file under
+    /// one second, a recording cut by a crash.
+    pub duration_s: u32,
+    /// Data format version (DAT byte 108, attribute `format_version`): `1`
+    /// for a file of data format v1, `0` before.
+    pub format_version: u8,
+    /// Metres of fibre between two adjacent positions (columns), as the file
+    /// stores it (DAT f32 bytes 112..116, read back exactly as the f64 the
+    /// other formats store); `0.0` when absent.
+    pub spatial_step_m: f64,
+    /// Seconds between two lines, as the file stores it (DAT f32 bytes
+    /// 116..120, same rule); `0.0` when absent. Informative: times come from
+    /// the anchor, the card's rational and the time map, never from it.
+    pub temporal_step_s: f64,
 }
+
+/// The light speed in the fibre, halved for the round trip: one sample at
+/// `f` Hz spans `1e8 / f` metres of fibre (`audace::LIGHT_SPEED_IN_FIBER_M_S`
+/// = 2e8 m/s).
+const METRES_PER_SAMPLE_HZ: f64 = 100_000_000.0;
 
 impl Header {
     /// The consistent card rational, see [`consistent_rational`].
@@ -318,13 +358,126 @@ impl Header {
                 .map(|f| (f, 1))
         })
     }
+
+    /// The content type a reader applies: the header's, except value 5 with
+    /// 4-byte samples in a header written before v1 — the f32 magnitude the
+    /// demodulation wrote under 5 then, which is 16 (Audace-Lib
+    /// `header::normalized_content_type`).
+    fn normalized_ct(&self) -> u8 {
+        if self.format_version == 0 && self.content_type == 5 && self.sample_size == 4 {
+            16
+        } else {
+            self.content_type
+        }
+    }
+
+    fn info(&self) -> Option<&'static content::ContentInfo> {
+        content::info(self.normalized_ct())
+    }
+
+    /// `true` when the content type fixes a sample size the header does not
+    /// have: such a file is read from the flags, like content type 0.
+    fn contradicts(&self) -> bool {
+        let ct = self.normalized_ct();
+        !content::layout_from_flags(ct)
+            && content::info(ct).and_then(|i| i.sample_size).map(i32::from) != Some(self.sample_size)
+    }
+
+    /// Whether what the samples ARE comes from the flags: content type 0, an
+    /// unassigned value, a contradicted `sample_size`.
+    fn quantity_from_flags(&self) -> bool {
+        self.content_type == 0 || self.info().is_none() || self.contradicts()
+    }
+
+    /// `(bytes, float, unsigned)`: how every sample is stored — Audace-Lib's
+    /// `header::sample_encoding`. From the content type whenever it fixes it
+    /// and `sample_size` agrees; else from `sample_size` and the FLOAT /
+    /// UNSIGNED / INTERLEAVED flags, exactly as before v1. `unsigned` means
+    /// every sample of the array (a single `u16` column); a pair whose
+    /// members differ stays signed, its odd member reinterpreted by the
+    /// extractor.
+    fn encoding(&self) -> (i32, bool, bool) {
+        let bytes = self.sample_size;
+        if let Some(info) = self.info().filter(|i| i.sample_size.map(i32::from) == Some(bytes)) {
+            let typed = match (info.sample_type, info.members) {
+                (Some(SampleType::FromFlags), _) | (None, None) => None,
+                (Some(t), _) => Some((t, t)),
+                (None, Some([a, b])) => Some((a.sample_type, b.sample_type)),
+            };
+            if let Some((a, b)) = typed {
+                return (bytes, a == SampleType::F32, a == SampleType::U16 && b == SampleType::U16);
+            }
+        }
+        let f = self.flags;
+        (
+            bytes,
+            f & flag_bits::FLOAT != 0,
+            f & flag_bits::UNSIGNED != 0 && f & (flag_bits::FLOAT | flag_bits::INTERLEAVED) == 0,
+        )
+    }
+
+    fn interleaved(&self) -> bool {
+        let ct = self.normalized_ct();
+        content::is_stream_only(ct)
+            || (content::layout_from_flags(ct) && self.flags & flag_bits::INTERLEAVED != 0)
+    }
+
+    /// The steps the header's other fields give, f64 (Audace-Lib
+    /// `derived_steps`): `1e8 / sample_rate` for a value whose positions are
+    /// the producer's samples (not a script's output, not a zone variance,
+    /// not an unassigned value), the real line period from the cadence; 0
+    /// each when it cannot be derived.
+    fn derived_steps(&self) -> (f64, f64) {
+        let ct = self.content_type;
+        let quantity = content::info(ct).and_then(|i| i.quantity.or(i.members.map(|m| m[0].quantity)));
+        let derivable = content::info(ct).is_some()
+            && !matches!(quantity, Some("custom" | "variance" | "log_variance"));
+        let spatial = if derivable && self.sample_rate > 0 {
+            METRES_PER_SAMPLE_HZ / self.sample_rate as f64
+        } else {
+            0.0
+        };
+        let temporal = self
+            .line_rational()
+            .map_or(0.0, |(clock, ticks)| ticks as f64 / clock as f64);
+        (spatial, temporal)
+    }
+}
+
+/// A step stored as f32 (DAT), in f64: the derived value when the field is
+/// that very value rounded to f32 (`0.4` m, not `0.4000000059604645`), the
+/// field otherwise; 0 when absent — Audace-Lib `exact_spatial_step_m` /
+/// `exact_temporal_step_s`, so a DAT and an HDF5 of one recording agree.
+fn exact_step(field: f32, derived: f64) -> f64 {
+    if !(field.is_finite() && field > 0.0) {
+        0.0
+    } else if derived > 0.0 && (derived as f32) == field {
+        derived
+    } else {
+        f64::from(field)
+    }
+}
+
+/// The card code of a value given to `Header(card=…)`: a code, a tag written
+/// before v1 (mapped), `None` / `""` for none; anything else is refused.
+fn card_argument(card: Option<String>) -> PyResult<Option<String>> {
+    match card.as_deref() {
+        None | Some("") => Ok(None),
+        Some(s) => content::card_code(s).map(|c| Some(c.to_string())).ok_or_else(|| {
+            PyValueError::new_err(format!(
+                "card must be one of {:?} (or None), got {s:?}",
+                content::CARD_CODES
+            ))
+        }),
+    }
 }
 
 #[pymethods]
 impl Header {
     /// Build a header from individual fields. Used by the format wrappers
     /// (HDF5/TDMS/SEG-Y) to feed the same channel extractors as the DAT
-    /// path without going through the binary wire format.
+    /// path without going through the binary wire format. `card` takes a
+    /// card code (`"p18"`, `"p21"`, `"s125"`, `"s500"`) or `None`.
     #[new]
     #[pyo3(signature = (
         line_size,
@@ -344,6 +497,10 @@ impl Header {
         line_offset = 0,
         time_flags = 0,
         card = None,
+        duration_s = 0,
+        format_version = 0,
+        spatial_step_m = 0.0,
+        temporal_step_s = 0.0,
     ))]
     #[allow(clippy::too_many_arguments)]
     fn new(
@@ -364,8 +521,13 @@ impl Header {
         line_offset: i32,
         time_flags: u32,
         card: Option<String>,
-    ) -> Self {
-        Self {
+        duration_s: u32,
+        format_version: u8,
+        spatial_step_m: f64,
+        temporal_step_s: f64,
+    ) -> PyResult<Self> {
+        let finite_or_zero = |v: f64| if v.is_finite() && v > 0.0 { v } else { 0.0 };
+        Ok(Self {
             timestamp,
             line_size,
             trig_frequency,
@@ -376,21 +538,25 @@ impl Header {
             pulse_width,
             num_channels,
             content_type,
-            card,
+            card: card_argument(card)?,
             acquisition_ns,
             trigger_delay,
             trig_clock_hz,
             trig_period_ticks,
             line_offset,
             time_flags,
-        }
+            duration_s,
+            format_version,
+            spatial_step_m: finite_or_zero(spatial_step_m),
+            temporal_step_s: finite_or_zero(temporal_step_s),
+        })
     }
 
     /// `True` when the header's start time is the corrected time of the
     /// file's first line (`time_flags & TIME_FLAG_CORRECTED`): a DAT stamped
     /// from the card's time map, or an HDF5 whose `time_correction` is
     /// `"cardclock-v1"`. Always `False` for TDMS and SEG-Y: neither format
-    /// carries the time flags (nor an absolute time, only a display string).
+    /// carries the time flags.
     #[getter]
     fn time_corrected(&self) -> bool {
         self.time_flags & time_flag_bits::TIME_CORRECTED != 0
@@ -458,7 +624,7 @@ impl Header {
         self.acquisition_ns.saturating_add(self.lines_to_ns(index))
     }
 
-    /// Lowercase `content_type` tag (e.g. `"interleaved_hw_phase_amplitude"`),
+    /// Lowercase `content_type` tag (e.g. `"dui_coherent_phase"`),
     /// `"undefined"` for a capture written before the byte existed (0), and
     /// `"unknown(<n>)"` for a value this SDK does not know (a newer producer).
     #[getter]
@@ -466,37 +632,89 @@ impl Header {
         content_type_tag(self.content_type)
     }
 
-    /// True if the `INTERLEAVED` bit is set — the wire carries 2 samples
-    /// per spatial position (I/Q or arctan/√).
+    /// The content type a reader applies: `content_type`, except value 5
+    /// with 4-byte samples in a header written before data format v1 (the
+    /// f32 magnitude the demodulation labelled 5 then), which is 16
+    /// (`hw_amplitude_f32`).
+    #[getter]
+    fn normalized_content_type(&self) -> u8 {
+        self.normalized_ct()
+    }
+
+    /// `True` when the content type fixes a sample size this header does not
+    /// have (a file of the retired software PHASE method, say): the samples
+    /// are then read from the flags, as for content type 0.
+    #[getter]
+    fn sample_size_contradicts_content_type(&self) -> bool {
+        self.contradicts()
+    }
+
+    /// `(bytes, float, unsigned)`: how each sample is stored — from the
+    /// content type when it fixes it, else from `sample_size` and the
+    /// flags (content type 0, 12, an unassigned value, a contradicted
+    /// `sample_size`). `unsigned` is `True` when every sample of the array
+    /// is unsigned (a single `u16` column).
+    #[getter]
+    fn sample_encoding(&self) -> (i32, bool, bool) {
+        self.encoding()
+    }
+
+    /// True when the samples come in pairs per position: a stream-only
+    /// (interleaved) content type, or the `INTERLEAVED` flag for content
+    /// type 0, 12 and an unassigned value. Never for a v1 file.
     #[getter]
     fn is_interleaved(&self) -> bool {
-        self.flags & flag_bits::INTERLEAVED != 0
+        self.interleaved()
     }
 
-    /// True if samples are IEEE-754 floats.
+    /// True if samples are IEEE-754 floats (from the content type when it
+    /// fixes the sample type, else the `FLOAT` flag).
     #[getter]
     fn is_float(&self) -> bool {
-        self.flags & flag_bits::FLOAT != 0
+        self.encoding().1
     }
 
-    /// True if the `UNSIGNED` bit is set: on an INTERLEAVED pair, the odd
-    /// lane is unsigned (PCIe7821 ArctanMagnitude mode: `√(I²+Q²)` as
-    /// `u16`); on a single column (the `magnitude/` child of a split
-    /// arctan/magnitude stream), every integer sample is unsigned and the
-    /// readers return `uint16`.
+    /// True when (some of) the integer samples are unsigned: a `u16` column
+    /// (content types 5, 25), the magnitude member of an arctan/magnitude
+    /// pair (7) — or, read from the flags (content type 0, 12, an unassigned
+    /// value), the `UNSIGNED` bit: on an INTERLEAVED pair the odd lane is
+    /// `u16`; on a single column every integer sample is (read as `uint16`).
     #[getter]
     fn is_unsigned(&self) -> bool {
-        self.flags & flag_bits::UNSIGNED != 0
+        let ct = self.normalized_ct();
+        match self.info() {
+            Some(i) if !content::layout_from_flags(ct) && !self.contradicts() => {
+                i.sample_type == Some(SampleType::U16)
+                    || i.members.is_some_and(|m| m.iter().any(|m| m.sample_type == SampleType::U16))
+            }
+            _ => self.flags & flag_bits::UNSIGNED != 0,
+        }
     }
 
+    /// True if the samples come out of a demodulation (on board or in
+    /// software): phase, arctan, amplitude, I or Q, or a pair of them. From
+    /// the content type; from the `DEMODULATED` flag for content type 0, an
+    /// unassigned value or a contradicted `sample_size`.
     #[getter]
     fn is_demodulated(&self) -> bool {
-        self.flags & flag_bits::DEMODULATED != 0
+        if self.quantity_from_flags() {
+            return self.flags & flag_bits::DEMODULATED != 0;
+        }
+        let i = self.info().expect("quantity_from_flags covers an unknown value");
+        i.members.is_some()
+            || matches!(i.quantity, Some("phase" | "arctan" | "amplitude" | "i" | "q"))
     }
 
+    /// True if the samples are (or include, as member 0 of a pair) a phase in
+    /// radians. From the content type; from the `PHASE` flag for content
+    /// type 0, an unassigned value or a contradicted `sample_size`.
     #[getter]
     fn is_phase(&self) -> bool {
-        self.flags & flag_bits::PHASE != 0
+        if self.quantity_from_flags() {
+            return self.flags & flag_bits::PHASE != 0;
+        }
+        let i = self.info().expect("quantity_from_flags covers an unknown value");
+        i.quantity == Some("phase") || i.members.is_some_and(|m| m[0].quantity == "phase")
     }
 
     #[getter]
@@ -509,13 +727,14 @@ impl Header {
         self.flags & flag_bits::HIZ != 0
     }
 
-    /// Whether the samples are the GPU Mozart software phase, or `None` when
-    /// the question does not apply or cannot be answered.
+    /// Whether the samples are the Mozart software phase (Mozart or
+    /// Mozart+), or `None` when the question does not apply or cannot be
+    /// answered.
     ///
     /// * A file that carries a `content_type` (non-zero) is answered by it
-    ///   alone — the flags are not consulted: `True` for `sw_mozart`, `None`
-    ///   for `raw` (no demodulation ran) and for a value this SDK does not
-    ///   know, `False` for every other content type.
+    ///   alone — the flags are not consulted: `True` for `sw_mozart` and
+    ///   `sw_mozart_plus`, `None` for `raw` (no demodulation ran) and for a
+    ///   value this SDK does not know, `False` for every other content type.
     /// * A capture written before `content_type` existed (`0`) keeps the
     ///   flag-based answer: `None` when `DEMODULATED` is clear, else whether
     ///   the `MOZART` bit is set.
@@ -528,29 +747,48 @@ impl Header {
         match self.content_type {
             0 => (self.flags & flag_bits::DEMODULATED != 0)
                 .then_some(self.flags & flag_bits::MOZART != 0),
-            CONTENT_TYPE_SW_MOZART => Some(true),
-            CONTENT_TYPE_RAW => None,
-            ct if known_content_type_tag(ct).is_some() => Some(false),
-            _ => None,
+            ct => match content::info(ct) {
+                None => None,
+                Some(i) if i.quantity == Some("raw") => None,
+                Some(i) => Some(matches!(i.method, Some("MOZART" | "MOZART_PLUS"))),
+            },
         }
     }
 
-    /// Physical spatial positions per pulse — `line_size / 2` when
-    /// INTERLEAVED, `line_size` otherwise. Mirrors
-    /// the Audace `positions_per_line` helper from the producer.
+    /// Physical spatial positions per pulse — `line_size / 2` for interleaved
+    /// pairs (see `is_interleaved`), `line_size` otherwise. Mirrors the
+    /// producer's `positions_per_line`.
     #[getter]
     fn positions_per_line(&self) -> i32 {
-        if self.is_interleaved() {
+        if self.interleaved() {
             self.line_size / 2
         } else {
             self.line_size
         }
     }
 
+    /// The spatial step the header's other fields give, m: `1e8 /
+    /// sample_rate` for a content type whose positions are the producer's
+    /// samples (not a script's output, a zone variance or an unassigned
+    /// value), else `0.0`. What a reader uses when `spatial_step_m` is
+    /// absent.
+    #[getter]
+    fn derived_spatial_step_m(&self) -> f64 {
+        self.derived_steps().0
+    }
+
+    /// The line period the cadence gives, s: `trig_period_ticks /
+    /// trig_clock_hz` on a consistent rational, else `1 / trig_frequency`;
+    /// `0.0` without a cadence.
+    #[getter]
+    fn derived_temporal_step_s(&self) -> f64 {
+        self.derived_steps().1
+    }
+
     fn __repr__(&self) -> String {
-        // The trigger rational and the time-map fields only when the header
-        // carries them, so the representation of every older header is
-        // unchanged.
+        // The trigger rational, the time-map fields, the card and the data
+        // format v1 fields only when the header carries them, so the
+        // representation of every older header is unchanged.
         let mut timing = if self.trig_clock_hz != 0 || self.trig_period_ticks != 0 {
             format!(
                 ", trig_clock_hz={}, trig_period_ticks={}",
@@ -567,6 +805,21 @@ impl Header {
         }
         if let Some(card) = &self.card {
             timing.push_str(&format!(", card='{card}'"));
+        }
+        if self.content_type != 0 {
+            timing.push_str(&format!(", content_type={}", self.content_type_name()));
+        }
+        if self.format_version != 0 {
+            timing.push_str(&format!(", format_version={}", self.format_version));
+        }
+        if self.duration_s != 0 {
+            timing.push_str(&format!(", duration_s={}", self.duration_s));
+        }
+        if self.spatial_step_m != 0.0 || self.temporal_step_s != 0.0 {
+            timing.push_str(&format!(
+                ", spatial_step_m={}, temporal_step_s={}",
+                self.spatial_step_m, self.temporal_step_s
+            ));
         }
         format!(
             "Header(line_size={}, sample_size={}, sample_rate={}, trig_frequency={}{}, \
@@ -625,8 +878,9 @@ fn parse_header(bytes: &[u8]) -> PyResult<Header> {
                 .unwrap_or(0);
             (String::from_utf8_lossy(&ts_raw[..end]).into_owned(), 0i64)
         };
+    let read_f32 = |offset: usize| f32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap());
 
-    Ok(Header {
+    let mut h = Header {
         timestamp,
         line_size: read_i32_le(bytes, offsets::LINE_SIZE),
         trig_frequency: read_i32_le(bytes, offsets::TRIG_FREQUENCY),
@@ -637,14 +891,25 @@ fn parse_header(bytes: &[u8]) -> PyResult<Header> {
         pulse_width: read_i32_le(bytes, offsets::PULSE_WIDTH),
         num_channels: read_i32_le(bytes, offsets::NUM_CHANNELS),
         content_type: bytes[offsets::CONTENT_TYPE],
-        card: parse_card_tag(&bytes[offsets::CARD_TAG..offsets::CARD_TAG + offsets::CARD_TAG_LEN]),
+        card: content::card_code_of_slot(&bytes[offsets::CARD_TAG..offsets::CARD_TAG + offsets::CARD_TAG_LEN])
+            .map(str::to_string),
         acquisition_ns,
         trigger_delay: read_u32_le(bytes, offsets::TRIGGER_DELAY),
         trig_clock_hz: read_u32_le(bytes, offsets::TRIG_CLOCK_HZ),
         trig_period_ticks: read_u32_le(bytes, offsets::TRIG_PERIOD_TICKS),
         line_offset: read_i32_le(bytes, offsets::LINE_OFFSET),
         time_flags: read_u32_le(bytes, offsets::TIME_FLAGS),
-    })
+        duration_s: read_u32_le(bytes, offsets::DURATION_S),
+        format_version: bytes[offsets::FORMAT_VERSION],
+        spatial_step_m: 0.0,
+        temporal_step_s: 0.0,
+    };
+    // The steps are f32 here: read back exactly as the other formats store
+    // them (f64), see `exact_step`.
+    let (spatial, temporal) = h.derived_steps();
+    h.spatial_step_m = exact_step(read_f32(offsets::SPATIAL_STEP_M), spatial);
+    h.temporal_step_s = exact_step(read_f32(offsets::TEMPORAL_STEP_S), temporal);
+    Ok(h)
 }
 
 // ── DAT reader (Python-exposed) ─────────────────────────────────────────────
@@ -797,10 +1062,12 @@ impl DatReader {
     }
 
     /// Read up to `n` pulses of samples and return them as a `(rows,
-    /// line_size)` numpy array. The dtype is picked from
-    /// `(sample_size, FLOAT, UNSIGNED, INTERLEAVED)` — see
-    /// [`bytes_to_typed_array`]: signed integers (negative ADC codes stay
-    /// negative) except a single-column `UNSIGNED` file, which is unsigned.
+    /// line_size)` numpy array. The dtype is the header's sample encoding
+    /// (`Header.sample_encoding`: the content type's sample type, or
+    /// `(sample_size, FLOAT, UNSIGNED, INTERLEAVED)` for content type 0, 12
+    /// and an unassigned value) — see [`bytes_to_typed_array`]: signed
+    /// integers (negative ADC codes stay negative) except a single unsigned
+    /// column, which is unsigned.
     ///
     /// The actual `read_exact` runs with the GIL released so other
     /// Python threads can do work while the OS blocks on disk I/O.
@@ -846,14 +1113,8 @@ impl DatReader {
         })?;
         self.lines_left -= n;
 
-        bytes_to_typed_array(
-            py,
-            bytes,
-            self.header.sample_size,
-            self.header.flags,
-            n as usize,
-            line_size,
-        )
+        let (sample_size, is_float, unsigned) = self.header.encoding();
+        bytes_to_typed_array(py, bytes, sample_size, is_float, unsigned, n as usize, line_size)
     }
 }
 
@@ -902,24 +1163,15 @@ fn validate_header(h: &Header) -> PyResult<()> {
     Ok(())
 }
 
-/// Whether a header's integer samples are unsigned as a whole: `UNSIGNED`
-/// on a single column (not `INTERLEAVED`, not `FLOAT`) — the `magnitude/`
-/// child of a split arctan/magnitude stream (`√(I²+Q²)`, `u16`). On an
-/// INTERLEAVED pair the bit concerns the odd lane only, handled by
-/// [`split_pair_unsigned`]; the pair itself stays signed.
-fn single_column_unsigned(flags: i32) -> bool {
-    flags & flag_bits::UNSIGNED != 0
-        && flags & flag_bits::INTERLEAVED == 0
-        && flags & flag_bits::FLOAT == 0
-}
-
 /// Convert a raw byte buffer of `rows × line_size` samples into a typed
-/// 2-D numpy array. Dispatches on `(sample_size, FLOAT)`: the **signed**
+/// 2-D numpy array. Dispatches on the header's sample encoding
+/// (`Header::encoding`: `sample_size`, float, unsigned): the **signed**
 /// type when integer (FileWriter / Cardcontrol conventions), except a
-/// single-column `UNSIGNED` file ([`single_column_unsigned`]), whose
-/// samples are the unsigned type of the same width. On an INTERLEAVED
-/// pair the UNSIGNED bit is a per-lane reinterpretation handled
-/// downstream by `split_pair_unsigned`, not a whole-array type change.
+/// single unsigned column (content type 5, 25, or a legacy single column
+/// with UNSIGNED), whose samples are the unsigned type of the same width.
+/// On a pair whose members differ (arctan `i16` + magnitude `u16`) the
+/// array stays signed: the odd lane is reinterpreted downstream by
+/// `split_pair_unsigned`, not by a whole-array type change.
 ///
 /// Takes ownership of `bytes` so the dispatch can move it directly into
 /// the typed `Vec<T>` without an intermediate copy.
@@ -927,12 +1179,11 @@ fn bytes_to_typed_array<'py>(
     py: Python<'py>,
     bytes: Vec<u8>,
     sample_size: i32,
-    flags: i32,
+    is_float: bool,
+    unsigned: bool,
     rows: usize,
     line_size: usize,
 ) -> PyResult<Bound<'py, PyAny>> {
-    let is_float = flags & flag_bits::FLOAT != 0;
-    let unsigned = single_column_unsigned(flags);
     let shape = (rows, line_size);
     macro_rules! typed {
         ($t:ty) => {{
@@ -1016,8 +1267,8 @@ fn bytes_to_vec<T: Copy>(bytes: &[u8]) -> Vec<T> {
 //    caller hands us a non-contiguous numpy view we make an explicit
 //    contiguous copy via `view.to_owned()` so the fast path runs.
 
-/// Pick the even-indexed (primary) lane of an INTERLEAVED `i16` array.
-/// PCIe7821 mapping: I in `Iq`, `arctan(Q/I)` in `ArctanMagnitude`.
+/// Pick the even-indexed (primary) lane of an INTERLEAVED `i16` array:
+/// member 0 — I of an I/Q pair, `arctan(Q/I)` of an arctan/magnitude pair.
 #[pyfunction]
 fn split_pair_i16_primary<'py>(
     py: Python<'py>,
@@ -1033,9 +1284,9 @@ fn split_pair_i16_primary<'py>(
     Ok(PyArray2::from_owned_array(py, arr))
 }
 
-/// Pick the odd-indexed (secondary) lane of an INTERLEAVED `i16` array.
-/// PCIe7821 mapping: Q in `Iq` (use the unsigned variant for magnitude
-/// in `ArctanMagnitude`).
+/// Pick the odd-indexed (secondary) lane of an INTERLEAVED `i16` array:
+/// member 1 — Q of an I/Q pair (use the unsigned variant for the magnitude
+/// of an arctan/magnitude pair).
 #[pyfunction]
 fn split_pair_i16_secondary<'py>(
     py: Python<'py>,
@@ -1052,9 +1303,9 @@ fn split_pair_i16_secondary<'py>(
 }
 
 /// Pick the odd-indexed lane of an INTERLEAVED `i16` array and
-/// **reinterpret the bits as `u16`**. PCIe7821 mapping:
-/// `√(I²+Q²)` magnitude in `ArctanMagnitude` (vendor sends magnitude as
-/// unsigned 16-bit despite the buffer being typed `i16` end-to-end).
+/// **reinterpret the bits as `u16`**: the `√(I²+Q²)` magnitude of an
+/// arctan/magnitude pair (the card sends the magnitude as unsigned 16-bit
+/// although the buffer is typed `i16` end to end).
 #[pyfunction]
 fn split_pair_unsigned<'py>(
     py: Python<'py>,
@@ -1222,12 +1473,12 @@ fn build_header_bytes<'py>(py: Python<'py>, header: &Header) -> PyResult<Bound<'
     write(&mut buf, offsets::NUM_CHANNELS, header.num_channels);
     // content_type descriptor (byte 64).
     buf[offsets::CONTENT_TYPE] = header.content_type;
-    // Card tag (bytes 65..81): ASCII, NUL-padded, truncated to 16 bytes like
-    // Audace-Lib's `set_card_tag`; zero when the header carries none.
-    if let Some(card) = &header.card {
-        let tag = card.as_bytes();
-        let n = tag.len().min(offsets::CARD_TAG_LEN);
-        buf[offsets::CARD_TAG..offsets::CARD_TAG + n].copy_from_slice(&tag[..n]);
+    // Card code (bytes 65..81): ASCII, NUL-padded (Audace-Lib
+    // `set_card_code`); zero when the header carries none. `Header.card` only
+    // ever holds a code.
+    if let Some(card) = header.card.as_deref().and_then(content::card_code) {
+        let code = card.as_bytes();
+        buf[offsets::CARD_TAG..offsets::CARD_TAG + code.len()].copy_from_slice(code);
     }
     // Trigger pre-roll (bytes 84..88), u32 LE.
     buf[offsets::TRIGGER_DELAY..offsets::TRIGGER_DELAY + 4]
@@ -1244,6 +1495,16 @@ fn build_header_bytes<'py>(py: Python<'py>, header: &Header) -> PyResult<Bound<'
         .copy_from_slice(&header.line_offset.to_le_bytes());
     buf[offsets::TIME_FLAGS..offsets::TIME_FLAGS + 4]
         .copy_from_slice(&header.time_flags.to_le_bytes());
+    // Data format v1 (bytes 104..120), zero when absent: duration, version,
+    // and the steps as f32 (a step read from this layout comes back as the
+    // same f32, see `exact_step`).
+    buf[offsets::DURATION_S..offsets::DURATION_S + 4].copy_from_slice(&header.duration_s.to_le_bytes());
+    buf[offsets::FORMAT_VERSION] = header.format_version;
+    let step = |v: f64| if v.is_finite() && v > 0.0 { v as f32 } else { 0.0 };
+    buf[offsets::SPATIAL_STEP_M..offsets::SPATIAL_STEP_M + 4]
+        .copy_from_slice(&step(header.spatial_step_m).to_le_bytes());
+    buf[offsets::TEMPORAL_STEP_S..offsets::TEMPORAL_STEP_S + 4]
+        .copy_from_slice(&step(header.temporal_step_s).to_le_bytes());
 
     Ok(PyBytes::new(py, &buf))
 }
@@ -1360,7 +1621,7 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // Deprecated: no reader decides anything on this bit (the content type
     // is the reference); kept so existing imports keep working.
     m.add("FLAG_SCHUBERT", flag_bits::SCHUBERT)?;
-    m.add("FLAG_SPECTRUM", flag_bits::SPECTRUM)?;
+    m.add("FLAG_RESERVED", flag_bits::RESERVED)?;
     m.add("FLAG_MOZART", flag_bits::MOZART)?;
     m.add("FLAG_PHASE", flag_bits::PHASE)?;
     m.add("FLAG_INTERLEAVED", flag_bits::INTERLEAVED)?;
@@ -1369,8 +1630,8 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("TIME_FLAG_MAP_V1", time_flag_bits::TIME_MAP_V1)?;
     m.add("TIME_FLAG_CORRECTED", time_flag_bits::TIME_CORRECTED)?;
 
-    // `{content_type value: tag}` for every value this SDK knows (0..=14),
-    // so the format backends can map a file's tag attribute back to its value.
+    // `{content_type value: tag}` for every value this SDK knows, so the
+    // format backends can map a file's tag attribute back to its value.
     let names = PyDict::new(m.py());
     for v in 0..=u8::MAX {
         if let Some(tag) = known_content_type_tag(v) {
@@ -1378,6 +1639,77 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
         }
     }
     m.add("CONTENT_TYPE_NAMES", names)?;
+    m.add("CONTENT_TYPES", content_types(m.py())?)?;
+    m.add("FORMAT_VERSION", FORMAT_VERSION)?;
+    m.add("CARD_CODES", content::CARD_CODES.to_vec())?;
+    m.add_function(wrap_pyfunction!(card_code, m)?)?;
+    let layout = PyList::empty(m.py());
+    for (name, offset, size, ty) in HEADER_LAYOUT {
+        layout.append((name, offset, size, ty))?;
+    }
+    m.add("HEADER_LAYOUT", layout)?;
 
     Ok(())
+}
+
+/// The registry as a list of dicts, one per value, keyed like the
+/// producer's machine-readable registry (`value`, `tag`, `quantity`,
+/// `sample_type`, `sample_size`, `unit`, `conversion`, `method`,
+/// `file_or_stream`, `members`, `split_children`, `status`).
+fn content_types(py: Python<'_>) -> PyResult<Bound<'_, PyList>> {
+    let rows = PyList::empty(py);
+    for i in content::REGISTRY.iter() {
+        let d = PyDict::new(py);
+        d.set_item("value", i.value)?;
+        d.set_item("tag", i.tag)?;
+        d.set_item("quantity", i.quantity)?;
+        d.set_item("sample_type", i.sample_type.map(SampleType::as_str))?;
+        d.set_item("sample_size", i.sample_size)?;
+        d.set_item("unit", i.unit)?;
+        match i.conversion {
+            Some(c) => {
+                let cd = PyDict::new(py);
+                cd.set_item("to", c.to)?;
+                cd.set_item("expr", c.expr)?;
+                cd.set_item("multiply_by", c.multiply_by)?;
+                cd.set_item("informative", c.informative)?;
+                d.set_item("conversion", cd)?;
+            }
+            None => d.set_item("conversion", py.None())?,
+        }
+        d.set_item("method", i.method)?;
+        d.set_item("file_or_stream", i.placement.as_str())?;
+        match i.members {
+            Some(members) => {
+                let ms = PyList::empty(py);
+                for m in members {
+                    let md = PyDict::new(py);
+                    md.set_item("quantity", m.quantity)?;
+                    md.set_item("sample_type", m.sample_type.as_str())?;
+                    md.set_item("unit", m.unit)?;
+                    md.set_item("subdir", m.subdir)?;
+                    md.set_item("child", m.child)?;
+                    ms.append(md)?;
+                }
+                d.set_item("members", ms)?;
+                d.set_item("split_children", vec![u32::from(members[0].child), u32::from(members[1].child)])?;
+            }
+            None => {
+                d.set_item("members", py.None())?;
+                d.set_item("split_children", py.None())?;
+            }
+        }
+        d.set_item("status", i.status)?;
+        rows.append(d)?;
+    }
+    Ok(rows)
+}
+
+/// The card code a header slot or a file's `card` attribute stands for:
+/// `"p18"`, `"p21"`, `"s125"` or `"s500"` as is, a variant tag written before
+/// data format v1 mapped to its code, `None` for anything else (empty,
+/// another producer's bytes).
+#[pyfunction]
+fn card_code(value: &str) -> Option<&'static str> {
+    content::card_code(value)
 }

@@ -1,0 +1,898 @@
+{
+ "schema": 1,
+ "revision": 2,
+ "format_version": 1,
+ "spec": "Audace-Lib/docs/DATA_FORMAT.md",
+ "light_speed_in_fiber_m_s": 200000000,
+ "header_size": 128,
+ "endianness": "little",
+ "header": [
+  {
+   "offset": 0,
+   "size": 32,
+   "type": "bytes",
+   "name": "timestamp",
+   "since": 0
+  },
+  {
+   "offset": 32,
+   "size": 4,
+   "type": "i32",
+   "name": "line_size",
+   "since": 0
+  },
+  {
+   "offset": 36,
+   "size": 4,
+   "type": "i32",
+   "name": "trig_frequency",
+   "since": 0
+  },
+  {
+   "offset": 40,
+   "size": 4,
+   "type": "i32",
+   "name": "sample_size",
+   "since": 0
+  },
+  {
+   "offset": 44,
+   "size": 4,
+   "type": "i32",
+   "name": "sample_rate",
+   "since": 0
+  },
+  {
+   "offset": 48,
+   "size": 4,
+   "type": "i32",
+   "name": "flags",
+   "since": 0
+  },
+  {
+   "offset": 52,
+   "size": 4,
+   "type": "i32",
+   "name": "range",
+   "since": 0
+  },
+  {
+   "offset": 56,
+   "size": 4,
+   "type": "i32",
+   "name": "pulse_width",
+   "since": 0
+  },
+  {
+   "offset": 60,
+   "size": 4,
+   "type": "i32",
+   "name": "num_channels",
+   "since": 0
+  },
+  {
+   "offset": 64,
+   "size": 1,
+   "type": "u8",
+   "name": "content_type",
+   "since": 0
+  },
+  {
+   "offset": 65,
+   "size": 16,
+   "type": "ascii",
+   "name": "card",
+   "since": 0
+  },
+  {
+   "offset": 84,
+   "size": 4,
+   "type": "u32",
+   "name": "trigger_delay",
+   "since": 0
+  },
+  {
+   "offset": 88,
+   "size": 4,
+   "type": "u32",
+   "name": "trig_clock_hz",
+   "since": 0
+  },
+  {
+   "offset": 92,
+   "size": 4,
+   "type": "u32",
+   "name": "trig_period_ticks",
+   "since": 0
+  },
+  {
+   "offset": 96,
+   "size": 4,
+   "type": "i32",
+   "name": "line_offset",
+   "since": 0
+  },
+  {
+   "offset": 100,
+   "size": 4,
+   "type": "u32",
+   "name": "time_flags",
+   "since": 0
+  },
+  {
+   "offset": 104,
+   "size": 4,
+   "type": "u32",
+   "name": "duration_s",
+   "since": 1
+  },
+  {
+   "offset": 108,
+   "size": 1,
+   "type": "u8",
+   "name": "format_version",
+   "since": 1
+  },
+  {
+   "offset": 112,
+   "size": 4,
+   "type": "f32",
+   "name": "spatial_step_m",
+   "since": 1
+  },
+  {
+   "offset": 116,
+   "size": 4,
+   "type": "f32",
+   "name": "temporal_step_s",
+   "since": 1
+  }
+ ],
+ "flags": [
+  {
+   "bit": 1,
+   "name": "DEMODULATED",
+   "v1_files": "zero"
+  },
+  {
+   "bit": 2,
+   "name": "FLOAT",
+   "v1_files": "from_flags_only"
+  },
+  {
+   "bit": 4,
+   "name": "AC",
+   "v1_files": "kept"
+  },
+  {
+   "bit": 8,
+   "name": "HIZ",
+   "v1_files": "kept"
+  },
+  {
+   "bit": 16,
+   "name": "SCHUBERT",
+   "v1_files": "deprecated"
+  },
+  {
+   "bit": 32,
+   "name": "SPECTRUM",
+   "v1_files": "zero"
+  },
+  {
+   "bit": 64,
+   "name": "MOZART",
+   "v1_files": "zero"
+  },
+  {
+   "bit": 128,
+   "name": "PHASE",
+   "v1_files": "zero"
+  },
+  {
+   "bit": 256,
+   "name": "INTERLEAVED",
+   "v1_files": "zero"
+  },
+  {
+   "bit": 512,
+   "name": "UNSIGNED",
+   "v1_files": "from_flags_only"
+  }
+ ],
+ "cards": [
+  {
+   "code": "p18",
+   "legacy_tags": [
+    "pcie7818"
+   ]
+  },
+  {
+   "code": "p21",
+   "legacy_tags": [
+    "pcie7821"
+   ]
+  },
+  {
+   "code": "s125",
+   "legacy_tags": []
+  },
+  {
+   "code": "s500",
+   "legacy_tags": []
+  }
+ ],
+ "unrecognized_marker": 255,
+ "content_types": [
+  {
+   "value": 0,
+   "tag": "undefined",
+   "rust_variant": "Undefined",
+   "quantity": null,
+   "sample_type": "from_flags",
+   "sample_size": null,
+   "unit": null,
+   "conversion": null,
+   "chain": "written before content_type existed",
+   "method": null,
+   "file_or_stream": "file",
+   "members": null,
+   "split_children": null,
+   "status": "legacy",
+   "notes": "read from sample_size and the flags, exactly as before v1"
+  },
+  {
+   "value": 1,
+   "tag": "raw",
+   "rust_variant": "Raw",
+   "quantity": "raw",
+   "sample_type": "i16",
+   "sample_size": 2,
+   "unit": "adc_count",
+   "conversion": {
+    "to": "mV",
+    "expr": "v * range / 32768",
+    "multiply_by": null,
+    "informative": true
+   },
+   "chain": "card: no on-board demodulation",
+   "method": null,
+   "file_or_stream": "file+stream",
+   "members": null,
+   "split_children": null,
+   "status": "current",
+   "notes": null
+  },
+  {
+   "value": 2,
+   "tag": "hw_phase",
+   "rust_variant": "HwPhase",
+   "quantity": "phase",
+   "sample_type": "f32",
+   "sample_size": 4,
+   "unit": "rad",
+   "conversion": null,
+   "chain": "card: p21 Phase tap",
+   "method": null,
+   "file_or_stream": "file+stream",
+   "members": null,
+   "split_children": null,
+   "status": "current",
+   "notes": null
+  },
+  {
+   "value": 3,
+   "tag": "hw_arctan",
+   "rust_variant": "HwArctan",
+   "quantity": "arctan",
+   "sample_type": "i16",
+   "sample_size": 2,
+   "unit": "count",
+   "conversion": {
+    "to": "rad",
+    "expr": "v * pi / 32768",
+    "multiply_by": 9.587379924285257e-05,
+    "informative": false
+   },
+   "chain": "card: wrapped arctan(Q/I)",
+   "method": null,
+   "file_or_stream": "file",
+   "members": null,
+   "split_children": null,
+   "status": "current",
+   "notes": null
+  },
+  {
+   "value": 4,
+   "tag": "hw_arctan_dui",
+   "rust_variant": "HwArctanDui",
+   "quantity": "phase",
+   "sample_type": "f32",
+   "sample_size": 4,
+   "unit": "rad",
+   "conversion": null,
+   "chain": "Demodulation: DUI family, method unknown",
+   "method": null,
+   "file_or_stream": "file",
+   "members": null,
+   "split_children": null,
+   "status": "frozen",
+   "notes": "read only; DUI, DUI_STATEFUL, DUI_COHERENT or PHASE_SAC before v1; never written by a v1 producer"
+  },
+  {
+   "value": 5,
+   "tag": "hw_amplitude",
+   "rust_variant": "HwAmplitude",
+   "quantity": "amplitude",
+   "sample_type": "u16",
+   "sample_size": 2,
+   "unit": "count",
+   "conversion": null,
+   "chain": "card: magnitude sqrt(I^2+Q^2)",
+   "method": null,
+   "file_or_stream": "file",
+   "members": null,
+   "split_children": null,
+   "status": "current",
+   "notes": "in a format_version 0 file with sample_size 4: f32, i.e. value 16"
+  },
+  {
+   "value": 6,
+   "tag": "interleaved_hw_iq",
+   "rust_variant": "InterleavedHwIq",
+   "quantity": null,
+   "sample_type": null,
+   "sample_size": 2,
+   "unit": null,
+   "conversion": null,
+   "chain": "card: I/Q tap",
+   "method": null,
+   "file_or_stream": "stream",
+   "members": [
+    {
+     "quantity": "i",
+     "sample_type": "i16",
+     "unit": "count",
+     "subdir": "i_component",
+     "child": 13
+    },
+    {
+     "quantity": "q",
+     "sample_type": "i16",
+     "unit": "count",
+     "subdir": "q_component",
+     "child": 14
+    }
+   ],
+   "split_children": [
+    13,
+    14
+   ],
+   "status": "current",
+   "notes": null
+  },
+  {
+   "value": 7,
+   "tag": "interleaved_hw_arctan_amplitude",
+   "rust_variant": "InterleavedHwArctanAmplitude",
+   "quantity": null,
+   "sample_type": null,
+   "sample_size": 2,
+   "unit": null,
+   "conversion": null,
+   "chain": "card: arctan/magnitude tap",
+   "method": null,
+   "file_or_stream": "stream",
+   "members": [
+    {
+     "quantity": "arctan",
+     "sample_type": "i16",
+     "unit": "count",
+     "subdir": "arctan",
+     "child": 3
+    },
+    {
+     "quantity": "amplitude",
+     "sample_type": "u16",
+     "unit": "count",
+     "subdir": "magnitude",
+     "child": 5
+    }
+   ],
+   "split_children": [
+    3,
+    5
+   ],
+   "status": "current",
+   "notes": null
+  },
+  {
+   "value": 8,
+   "tag": "interleaved_hw_phase_amplitude",
+   "rust_variant": "InterleavedHwPhaseAmplitude",
+   "quantity": null,
+   "sample_type": null,
+   "sample_size": 4,
+   "unit": null,
+   "conversion": null,
+   "chain": "Demodulation: DUI family with amplitude kept, method unknown",
+   "method": null,
+   "file_or_stream": "stream",
+   "members": [
+    {
+     "quantity": "phase",
+     "sample_type": "f32",
+     "unit": "rad",
+     "subdir": "phase",
+     "child": 4
+    },
+    {
+     "quantity": "amplitude",
+     "sample_type": "f32",
+     "unit": "count",
+     "subdir": "amplitude",
+     "child": 16
+    }
+   ],
+   "split_children": [
+    4,
+    16
+   ],
+   "status": "frozen",
+   "notes": "never written by a v1 producer"
+  },
+  {
+   "value": 9,
+   "tag": "sw_mozart",
+   "rust_variant": "SwMozart",
+   "quantity": "phase",
+   "sample_type": "f32",
+   "sample_size": 4,
+   "unit": "rad",
+   "conversion": null,
+   "chain": "Demodulation: MOZART",
+   "method": "MOZART",
+   "file_or_stream": "file+stream",
+   "members": null,
+   "split_children": null,
+   "status": "current",
+   "notes": "in a format_version 0 file: MOZART or MOZART_PLUS"
+  },
+  {
+   "value": 10,
+   "tag": "sw_phase_sac",
+   "rust_variant": "SwPhaseSac",
+   "quantity": "phase",
+   "sample_type": "f32",
+   "sample_size": 4,
+   "unit": "rad",
+   "conversion": null,
+   "chain": "Demodulation: PHASE_SAC",
+   "method": "PHASE_SAC",
+   "file_or_stream": "file+stream",
+   "members": null,
+   "split_children": null,
+   "status": "new",
+   "notes": "renamed from sw_phase, never written before v1"
+  },
+  {
+   "value": 11,
+   "tag": "sw_amplitude_sac",
+   "rust_variant": "SwAmplitudeSac",
+   "quantity": "amplitude",
+   "sample_type": "f32",
+   "sample_size": 4,
+   "unit": "front_end_count",
+   "conversion": null,
+   "chain": "Demodulation: PHASE_SAC software magnitude",
+   "method": "PHASE_SAC",
+   "file_or_stream": "file",
+   "members": null,
+   "split_children": null,
+   "status": "new",
+   "notes": "renamed from sw_amplitude, never written before v1"
+  },
+  {
+   "value": 12,
+   "tag": "sw_custom",
+   "rust_variant": "SwCustom",
+   "quantity": "custom",
+   "sample_type": "from_flags",
+   "sample_size": null,
+   "unit": "script",
+   "conversion": null,
+   "chain": "Sandbox script, sample type from the flags",
+   "method": null,
+   "file_or_stream": "file+stream",
+   "members": null,
+   "split_children": null,
+   "status": "frozen",
+   "notes": "sample type from sample_size + FLOAT + UNSIGNED, as before v1; never interleaved; v1 Sandbox outputs are 24, 25, 26"
+  },
+  {
+   "value": 13,
+   "tag": "hw_i",
+   "rust_variant": "HwI",
+   "quantity": "i",
+   "sample_type": "i16",
+   "sample_size": 2,
+   "unit": "count",
+   "conversion": null,
+   "chain": "card: I component",
+   "method": null,
+   "file_or_stream": "file",
+   "members": null,
+   "split_children": null,
+   "status": "current",
+   "notes": null
+  },
+  {
+   "value": 14,
+   "tag": "hw_q",
+   "rust_variant": "HwQ",
+   "quantity": "q",
+   "sample_type": "i16",
+   "sample_size": 2,
+   "unit": "count",
+   "conversion": null,
+   "chain": "card: Q component",
+   "method": null,
+   "file_or_stream": "file",
+   "members": null,
+   "split_children": null,
+   "status": "current",
+   "notes": null
+  },
+  {
+   "value": 15,
+   "tag": "interleaved_phase_sac_amplitude",
+   "rust_variant": "InterleavedPhaseSacAmplitude",
+   "quantity": null,
+   "sample_type": null,
+   "sample_size": 4,
+   "unit": null,
+   "conversion": null,
+   "chain": "Demodulation: PHASE_SAC with amplitude kept",
+   "method": "PHASE_SAC",
+   "file_or_stream": "stream",
+   "members": [
+    {
+     "quantity": "phase",
+     "sample_type": "f32",
+     "unit": "rad",
+     "subdir": "phase",
+     "child": 10
+    },
+    {
+     "quantity": "amplitude",
+     "sample_type": "f32",
+     "unit": "front_end_count",
+     "subdir": "amplitude",
+     "child": 11
+    }
+   ],
+   "split_children": [
+    10,
+    11
+   ],
+   "status": "new",
+   "notes": null
+  },
+  {
+   "value": 16,
+   "tag": "hw_amplitude_f32",
+   "rust_variant": "HwAmplitudeF32",
+   "quantity": "amplitude",
+   "sample_type": "f32",
+   "sample_size": 4,
+   "unit": "count",
+   "conversion": null,
+   "chain": "card magnitude carried as f32 (exact u16 to f32)",
+   "method": null,
+   "file_or_stream": "file+stream",
+   "members": null,
+   "split_children": null,
+   "status": "new",
+   "notes": "AMPLITUDE method output; amplitude child of 8, 20, 21, 22"
+  },
+  {
+   "value": 17,
+   "tag": "dui_phase",
+   "rust_variant": "DuiPhase",
+   "quantity": "phase",
+   "sample_type": "f32",
+   "sample_size": 4,
+   "unit": "rad",
+   "conversion": null,
+   "chain": "Demodulation: DUI",
+   "method": "DUI",
+   "file_or_stream": "file+stream",
+   "members": null,
+   "split_children": null,
+   "status": "new",
+   "notes": null
+  },
+  {
+   "value": 18,
+   "tag": "dui_stateful_phase",
+   "rust_variant": "DuiStatefulPhase",
+   "quantity": "phase",
+   "sample_type": "f32",
+   "sample_size": 4,
+   "unit": "rad",
+   "conversion": null,
+   "chain": "Demodulation: DUI_STATEFUL",
+   "method": "DUI_STATEFUL",
+   "file_or_stream": "file+stream",
+   "members": null,
+   "split_children": null,
+   "status": "new",
+   "notes": null
+  },
+  {
+   "value": 19,
+   "tag": "dui_coherent_phase",
+   "rust_variant": "DuiCoherentPhase",
+   "quantity": "phase",
+   "sample_type": "f32",
+   "sample_size": 4,
+   "unit": "rad",
+   "conversion": null,
+   "chain": "Demodulation: DUI_COHERENT (Phase+)",
+   "method": "DUI_COHERENT",
+   "file_or_stream": "file+stream",
+   "members": null,
+   "split_children": null,
+   "status": "new",
+   "notes": null
+  },
+  {
+   "value": 20,
+   "tag": "interleaved_dui_phase_amplitude",
+   "rust_variant": "InterleavedDuiPhaseAmplitude",
+   "quantity": null,
+   "sample_type": null,
+   "sample_size": 4,
+   "unit": null,
+   "conversion": null,
+   "chain": "Demodulation: DUI with amplitude kept",
+   "method": "DUI",
+   "file_or_stream": "stream",
+   "members": [
+    {
+     "quantity": "phase",
+     "sample_type": "f32",
+     "unit": "rad",
+     "subdir": "phase",
+     "child": 17
+    },
+    {
+     "quantity": "amplitude",
+     "sample_type": "f32",
+     "unit": "count",
+     "subdir": "amplitude",
+     "child": 16
+    }
+   ],
+   "split_children": [
+    17,
+    16
+   ],
+   "status": "new",
+   "notes": null
+  },
+  {
+   "value": 21,
+   "tag": "interleaved_dui_stateful_phase_amplitude",
+   "rust_variant": "InterleavedDuiStatefulPhaseAmplitude",
+   "quantity": null,
+   "sample_type": null,
+   "sample_size": 4,
+   "unit": null,
+   "conversion": null,
+   "chain": "Demodulation: DUI_STATEFUL with amplitude kept",
+   "method": "DUI_STATEFUL",
+   "file_or_stream": "stream",
+   "members": [
+    {
+     "quantity": "phase",
+     "sample_type": "f32",
+     "unit": "rad",
+     "subdir": "phase",
+     "child": 18
+    },
+    {
+     "quantity": "amplitude",
+     "sample_type": "f32",
+     "unit": "count",
+     "subdir": "amplitude",
+     "child": 16
+    }
+   ],
+   "split_children": [
+    18,
+    16
+   ],
+   "status": "new",
+   "notes": null
+  },
+  {
+   "value": 22,
+   "tag": "interleaved_dui_coherent_phase_amplitude",
+   "rust_variant": "InterleavedDuiCoherentPhaseAmplitude",
+   "quantity": null,
+   "sample_type": null,
+   "sample_size": 4,
+   "unit": null,
+   "conversion": null,
+   "chain": "Demodulation: DUI_COHERENT with amplitude kept",
+   "method": "DUI_COHERENT",
+   "file_or_stream": "stream",
+   "members": [
+    {
+     "quantity": "phase",
+     "sample_type": "f32",
+     "unit": "rad",
+     "subdir": "phase",
+     "child": 19
+    },
+    {
+     "quantity": "amplitude",
+     "sample_type": "f32",
+     "unit": "count",
+     "subdir": "amplitude",
+     "child": 16
+    }
+   ],
+   "split_children": [
+    19,
+    16
+   ],
+   "status": "new",
+   "notes": null
+  },
+  {
+   "value": 23,
+   "tag": "sw_mozart_plus",
+   "rust_variant": "SwMozartPlus",
+   "quantity": "phase",
+   "sample_type": "f32",
+   "sample_size": 4,
+   "unit": "rad",
+   "conversion": null,
+   "chain": "Demodulation: MOZART_PLUS",
+   "method": "MOZART_PLUS",
+   "file_or_stream": "file+stream",
+   "members": null,
+   "split_children": null,
+   "status": "new",
+   "notes": null
+  },
+  {
+   "value": 24,
+   "tag": "sw_custom_i16",
+   "rust_variant": "SwCustomI16",
+   "quantity": "custom",
+   "sample_type": "i16",
+   "sample_size": 2,
+   "unit": "script",
+   "conversion": null,
+   "chain": "Sandbox script, i16 output",
+   "method": null,
+   "file_or_stream": "file+stream",
+   "members": null,
+   "split_children": null,
+   "status": "new",
+   "notes": null
+  },
+  {
+   "value": 25,
+   "tag": "sw_custom_u16",
+   "rust_variant": "SwCustomU16",
+   "quantity": "custom",
+   "sample_type": "u16",
+   "sample_size": 2,
+   "unit": "script",
+   "conversion": null,
+   "chain": "Sandbox script, u16 output",
+   "method": null,
+   "file_or_stream": "file+stream",
+   "members": null,
+   "split_children": null,
+   "status": "new",
+   "notes": null
+  },
+  {
+   "value": 26,
+   "tag": "sw_custom_f32",
+   "rust_variant": "SwCustomF32",
+   "quantity": "custom",
+   "sample_type": "f32",
+   "sample_size": 4,
+   "unit": "script",
+   "conversion": null,
+   "chain": "Sandbox script, f32 output",
+   "method": null,
+   "file_or_stream": "file+stream",
+   "members": null,
+   "split_children": null,
+   "status": "new",
+   "notes": null
+  },
+  {
+   "value": 27,
+   "tag": "viz_variance",
+   "rust_variant": "VizVariance",
+   "quantity": "variance",
+   "sample_type": "f32",
+   "sample_size": 4,
+   "unit": "source_unit_squared",
+   "conversion": null,
+   "chain": "Visualization zone variance (linear), exported by the Dashboard archives",
+   "method": null,
+   "file_or_stream": "file",
+   "members": null,
+   "split_children": null,
+   "status": "new",
+   "notes": "one column per zone; spatial_step_m = the zone spacing, temporal_step_s = the archive row period"
+  },
+  {
+   "value": 28,
+   "tag": "viz_logvar",
+   "rust_variant": "VizLogvar",
+   "quantity": "log_variance",
+   "sample_type": "f32",
+   "sample_size": 4,
+   "unit": "dimensionless",
+   "conversion": {
+    "to": "source_unit_squared",
+    "expr": "10^v - 1",
+    "multiply_by": null,
+    "informative": false
+   },
+   "chain": "Visualization zone variance on the console's Log scale, log10(1 + variance), exported by the Dashboard archives",
+   "method": null,
+   "file_or_stream": "file",
+   "members": null,
+   "split_children": null,
+   "status": "new",
+   "notes": "v = log10(1 + max(variance, 0)), the variance of value 27 (Dashboard viz::Scale::Log); not audace-display's to_log_variance; one column per zone; spatial_step_m = the zone spacing, temporal_step_s = the archive row period"
+  }
+ ],
+ "sets": {
+  "is_phase": [
+   2,
+   4,
+   9,
+   10,
+   17,
+   18,
+   19,
+   23
+  ],
+  "is_amplitude": [
+   5,
+   11,
+   16
+  ],
+  "stream_only": [
+   6,
+   7,
+   8,
+   15,
+   20,
+   21,
+   22
+  ],
+  "legacy": [
+   0,
+   4,
+   8,
+   12
+  ],
+  "sample_type_from_flags": [
+   0,
+   12
+  ]
+ }
+}
