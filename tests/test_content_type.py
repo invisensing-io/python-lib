@@ -377,7 +377,6 @@ _DEMOD_PHASE = FLAG_DEMODULATED | FLAG_FLOAT | FLAG_PHASE
         (_DEMOD_PHASE, 2, False),
         (0, 19, False),
         (FLAG_DEMODULATED, 13, False),
-        (0, 12, False),
         (FLAG_MOZART, 1, None),
         (0, 1, None),
         # A value this SDK does not know: no answer.
@@ -492,8 +491,8 @@ def test_a_pre_v1_sw_custom_header_reads_as_its_flags_said(flags):
     assert h.is_float is bool(flags & FLAG_FLOAT)
     assert h.is_unsigned is bool(flags & FLAG_UNSIGNED)
     assert h.positions_per_line == (4 if flags & FLAG_INTERLEAVED else 8)
-    # Unchanged since before v1 too: a content type answers is_mozart.
-    assert h.is_mozart is False
+    # is_mozart too, as 1.3.0 answered it.
+    assert h.is_mozart is (bool(flags & FLAG_MOZART) if flags & FLAG_DEMODULATED else None)
 
 
 def test_a_pre_v1_sw_custom_phase_file_reads_as_a_phase(tmp_path):
@@ -556,6 +555,130 @@ def test_a_v1_sw_custom_header_is_custom_unless_its_flags_are_an_older_writer_s(
     assert h.is_phase is (mode is Mode.PHASE)
     assert h.is_float is bool(flags & FLAG_FLOAT)
     assert h.is_unsigned is bool(flags & FLAG_UNSIGNED)
+    if mode is Mode.CUSTOM:
+        # A script's output: its content type answers.
+        assert h.is_mozart is False
+
+
+# ── A pre-v1 file under a stream-only value without INTERLEAVED: the flags ─
+#
+# Before data format v1 the console's archive export copied its source's
+# header, changed only line_size (to the zone count) and set FLOAT (the
+# Dashboard's `override_dat_header`). An export of a DUI keep-amplitude
+# archive is therefore content type 8 with flags DEMODULATED | FLOAT | PHASE
+# and no INTERLEAVED, over one f32 column per zone, of any zone count. 1.3.0
+# read such a file from its flags (a phase per zone); so does this SDK.
+# Every pre-v1 file that holds pairs carries INTERLEAVED, and a stream
+# header (or a header of version 1) is paired whatever its flags say.
+
+_EXPORT_FLAGS = FLAG_DEMODULATED | FLAG_FLOAT | FLAG_PHASE  # 0x83
+
+
+def test_a_pre_v1_export_under_value_8_reads_one_column_per_zone(tmp_path):
+    zones = 7  # odd: never pairs
+    h = _header(content_type=8, sample_size=4, line_size=zones, flags=_EXPORT_FLAGS,
+                sample_rate=250_000_000, trig_frequency=4)
+    assert h.format_version == 0 and h.mode_from_flags
+    assert not h.is_interleaved and h.positions_per_line == zones
+    assert h.sample_encoding == (4, True, False)
+    assert Mode.from_header(h) is Mode.PHASE
+    assert h.is_phase and h.is_demodulated and h.is_float and not h.is_unsigned
+    assert h.is_mozart is False
+    zones_rows = (np.arange(3 * zones, dtype=np.float32).reshape(3, zones) + 1) * 0.5
+    path = tmp_path / "export.dat"
+    path.write_bytes(build_header_bytes(h) + zones_rows.tobytes())
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        with File(path) as f:
+            assert f.content_type == 8 and f.flags == _EXPORT_FLAGS
+            assert f.mode is Mode.PHASE and f.dtype == np.float32
+            assert f.shape == (3, zones) and f.spatial_shape == (3, zones)
+            assert not f.is_interleaved
+            assert f.quantity is None and f.unit is None
+            assert f.distance == pytest.approx(zones * 0.4)
+            np.testing.assert_array_equal(f.get_phase(n=3), zones_rows)
+            # A copy is a legacy copy (no v1 value says what it holds),
+            # read back the same way.
+            f.export_dat(tmp_path / "copy.dat")
+    with File(tmp_path / "copy.dat") as c:
+        assert (c.content_type, c.format_version, c.flags) == (8, 0, _EXPORT_FLAGS)
+        assert c.mode is Mode.PHASE and c.positions_per_line == zones
+        np.testing.assert_array_equal(c.read_all(), zones_rows)
+
+
+@pytest.mark.parametrize(
+    "ct,flags,mode,dtype",
+    [
+        (7, FLAG_DEMODULATED, Mode.RAW, np.int16),
+        # A single column with UNSIGNED: uint16 (the content type 0 rule).
+        (7, FLAG_DEMODULATED | FLAG_UNSIGNED, Mode.RAW, np.uint16),
+        (6, FLAG_DEMODULATED, Mode.RAW, np.int16),
+        (6, 0, Mode.RAW, np.int16),
+    ],
+)
+def test_a_pre_v1_card_pair_value_without_interleaved_is_one_column(tmp_path, ct, flags, mode, dtype):
+    h = _header(content_type=ct, sample_size=2, line_size=5, flags=flags)
+    assert h.mode_from_flags and not h.is_interleaved and h.positions_per_line == 5
+    assert Mode.from_header(h) is mode
+    assert h.is_unsigned is bool(flags & FLAG_UNSIGNED)
+    assert h.is_demodulated is bool(flags & FLAG_DEMODULATED)
+    assert h.is_mozart is (False if flags & FLAG_DEMODULATED else None)
+    values = np.array([[1, 2, 40_000, 4, 5], [6, 7, 8, 9, 65_535]], dtype=np.uint16).astype(dtype)
+    path = tmp_path / "column.dat"
+    path.write_bytes(build_header_bytes(h) + values.tobytes())
+    with File(path) as f:
+        assert f.mode is mode and f.dtype == dtype
+        assert f.shape == (2, 5) and f.positions_per_line == 5
+        assert f.quantity is None
+        np.testing.assert_array_equal(f.read_all(), values)
+
+
+@pytest.mark.parametrize(
+    "flags,format_version",
+    [
+        # A pre-v1 file of pairs: INTERLEAVED, as every writer set it.
+        (_EXPORT_FLAGS | FLAG_INTERLEAVED, 0),
+        # Version 1 (a stream's header): the content type decides alone.
+        (_EXPORT_FLAGS, 1),
+        (0, 1),
+    ],
+)
+def test_value_8_with_interleaved_or_of_version_1_stays_pairs(flags, format_version):
+    h = _header(content_type=8, sample_size=4, line_size=8, flags=flags, format_version=format_version)
+    assert not h.mode_from_flags
+    assert h.is_interleaved and h.positions_per_line == 4
+    assert Mode.from_header(h) is Mode.PHASE_AMPLITUDE
+    assert h.sample_encoding == (4, True, False)
+    assert h.is_mozart is False
+
+
+#: Two pre-v1 exports of the console (zone variances of a DUI keep-amplitude
+#: archive, content type 8, flags 0x83), when the Audace tree is checked out
+#: next to this one (skipped otherwise, e.g. from the sdist).
+_REAL_EXPORTS = Path(__file__).resolve().parents[2] / "Dashboard" / "labellisation" / "DATA"
+
+
+@pytest.mark.parametrize(
+    "name,zones,lines",
+    [
+        ("audace_ch0_2026-06-23_11h08m11s_to_2026-06-23_11h09m11s.dat", 627, 240),
+        ("audace_ch0_2026-07-02_13h55m00s_to_2026-07-02_13h57m00s.dat", 2508, 1200),
+    ],
+)
+def test_the_console_s_pre_v1_exports_read_one_column_per_zone(name, zones, lines):
+    path = _REAL_EXPORTS / name
+    if not path.is_file():
+        pytest.skip(f"{path} is not present")
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        with File(path) as f:
+            assert (f.content_type, f.flags, f.format_version) == (8, 0x83, 0)
+            assert f.mode is Mode.PHASE and f.dtype == np.float32
+            assert f.shape == (lines, zones) and f.positions_per_line == zones
+            assert not f.is_interleaved
+            rows = f.read_lines(4)
+            assert rows.shape == (4, zones)
+            assert np.isfinite(rows).all() and (rows >= 0).all()  # variances
 
 
 # ── The card code (bytes 65..81, every run since data format v1) ──────────

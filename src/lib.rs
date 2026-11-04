@@ -388,10 +388,32 @@ impl Header {
     }
 
     /// Whether what the samples ARE comes from the flags: content type 0, an
-    /// unassigned value, a contradicted `sample_size`, or a 12 of a Sandbox
-    /// older than v1 ([`Self::pre_v1_custom`]).
+    /// unassigned value, a contradicted `sample_size`, a 12 of a Sandbox
+    /// older than v1 ([`Self::pre_v1_custom`]), or a pre-v1 file of a
+    /// stream-only value that is not paired ([`Self::pre_v1_unpaired`]).
     fn quantity_from_flags(&self) -> bool {
-        self.content_type == 0 || self.info().is_none() || self.contradicts() || self.pre_v1_custom()
+        self.content_type == 0
+            || self.info().is_none()
+            || self.contradicts()
+            || self.pre_v1_custom()
+            || self.pre_v1_unpaired()
+    }
+
+    /// A file written before data format v1 (`format_version` 0) whose
+    /// content type is a stream-only (interleaved) value but whose
+    /// INTERLEAVED flag is clear: not pairs (Audace-Lib
+    /// `header::is_unpaired_legacy_file`). Before v1 the console's archive
+    /// export copied its source's header, changed only `line_size` (to the
+    /// zone count) and set FLOAT, so an export of a DUI keep-amplitude
+    /// archive is content type 8 with flags DEMODULATED | FLOAT | PHASE over
+    /// one f32 column per zone. Such a file is read from its flags, as
+    /// content type 0 is — how every reader before v1 read it. Every pre-v1
+    /// file that really holds pairs carries INTERLEAVED; a v1 file never
+    /// holds a stream-only value.
+    fn pre_v1_unpaired(&self) -> bool {
+        self.format_version == 0
+            && content::is_stream_only(self.normalized_ct())
+            && self.flags & flag_bits::INTERLEAVED == 0
     }
 
     /// A value-12 (`sw_custom`) header of a Sandbox older than data format
@@ -409,15 +431,17 @@ impl Header {
     }
 
     /// `(bytes, float, unsigned)`: how every sample is stored — Audace-Lib's
-    /// `header::sample_encoding`. From the content type whenever it fixes it
-    /// and `sample_size` agrees; else from `sample_size` and the FLOAT /
-    /// UNSIGNED / INTERLEAVED flags, exactly as before v1. `unsigned` means
-    /// every sample of the array (a single `u16` column); a pair whose
-    /// members differ stays signed, its odd member reinterpreted by the
-    /// extractor.
+    /// `header::file_sample_encoding`. From the content type whenever it
+    /// fixes it and `sample_size` agrees; else — and for a pre-v1 file of an
+    /// unpaired stream-only value ([`Self::pre_v1_unpaired`]) — from
+    /// `sample_size` and the FLOAT / UNSIGNED / INTERLEAVED flags, exactly as
+    /// before v1. `unsigned` means every sample of the array (a single `u16`
+    /// column); a pair whose members differ stays signed, its odd member
+    /// reinterpreted by the extractor.
     fn encoding(&self) -> (i32, bool, bool) {
         let bytes = self.sample_size;
-        if let Some(info) = self.info().filter(|i| i.sample_size.map(i32::from) == Some(bytes)) {
+        let typed_by = if self.pre_v1_unpaired() { None } else { self.info() };
+        if let Some(info) = typed_by.filter(|i| i.sample_size.map(i32::from) == Some(bytes)) {
             let typed = match (info.sample_type, info.members) {
                 (Some(SampleType::FromFlags), _) | (None, None) => None,
                 (Some(t), _) => Some((t, t)),
@@ -437,7 +461,7 @@ impl Header {
 
     fn interleaved(&self) -> bool {
         let ct = self.normalized_ct();
-        content::is_stream_only(ct)
+        (content::is_stream_only(ct) && !self.pre_v1_unpaired())
             || (content::layout_from_flags(ct) && self.flags & flag_bits::INTERLEAVED != 0)
     }
 
@@ -671,11 +695,14 @@ impl Header {
     /// `True` when what the samples are — `Mode`, `is_phase`,
     /// `is_demodulated` — comes from the flags, as it did for every file
     /// before data format v1: content type 0, a value this SDK does not
-    /// know, a `sample_size` the content type contradicts, or a
-    /// `sw_custom` (12) file of a Sandbox older than v1 (`format_version`
-    /// 0, or the PHASE or INTERLEAVED bit set), which kept its input's
-    /// flags. The sample type and the pairs of 0 and 12 always come from
-    /// the flags.
+    /// know, a `sample_size` the content type contradicts, a `sw_custom`
+    /// (12) file of a Sandbox older than v1 (`format_version` 0, or the
+    /// PHASE or INTERLEAVED bit set), which kept its input's flags, or a
+    /// file written before v1 under a stream-only value (6, 7, 8, …) whose
+    /// INTERLEAVED flag is clear — an archive export of the console, which
+    /// kept its source's header over one column per zone: its sample type
+    /// and layout come from the flags too. The sample type and the pairs of
+    /// 0 and 12 always come from the flags.
     #[getter]
     fn mode_from_flags(&self) -> bool {
         self.quantity_from_flags()
@@ -684,7 +711,8 @@ impl Header {
     /// `(bytes, float, unsigned)`: how each sample is stored — from the
     /// content type when it fixes it, else from `sample_size` and the
     /// flags (content type 0, 12, an unassigned value, a contradicted
-    /// `sample_size`). `unsigned` is `True` when every sample of the array
+    /// `sample_size`, a pre-v1 file of a stream-only value without
+    /// INTERLEAVED). `unsigned` is `True` when every sample of the array
     /// is unsigned (a single `u16` column).
     #[getter]
     fn sample_encoding(&self) -> (i32, bool, bool) {
@@ -692,8 +720,10 @@ impl Header {
     }
 
     /// True when the samples come in pairs per position: a stream-only
-    /// (interleaved) content type, or the `INTERLEAVED` flag for content
-    /// type 0, 12 and an unassigned value. Never for a v1 file.
+    /// (interleaved) content type — except in a file written before v1
+    /// whose `INTERLEAVED` flag is clear (see `mode_from_flags`) — or the
+    /// `INTERLEAVED` flag for content type 0, 12 and an unassigned value.
+    /// Never for a v1 file.
     #[getter]
     fn is_interleaved(&self) -> bool {
         self.interleaved()
@@ -709,13 +739,15 @@ impl Header {
     /// True when (some of) the integer samples are unsigned: a `u16` column
     /// (content types 5, 25), the magnitude member of an arctan/magnitude
     /// pair (7) — or, read from the flags (content type 0, 12, an unassigned
-    /// value), the `UNSIGNED` bit: on an INTERLEAVED pair the odd lane is
-    /// `u16`; on a single column every integer sample is (read as `uint16`).
+    /// value, a contradicted `sample_size`, a pre-v1 file of an unpaired
+    /// stream-only value), the `UNSIGNED` bit: on an INTERLEAVED pair the
+    /// odd lane is `u16`; on a single column every integer sample is (read
+    /// as `uint16`).
     #[getter]
     fn is_unsigned(&self) -> bool {
         let ct = self.normalized_ct();
         match self.info() {
-            Some(i) if !content::layout_from_flags(ct) && !self.contradicts() => {
+            Some(i) if !content::layout_from_flags(ct) && !self.contradicts() && !self.pre_v1_unpaired() => {
                 i.sample_type == Some(SampleType::U16)
                     || i.members.is_some_and(|m| m.iter().any(|m| m.sample_type == SampleType::U16))
             }
@@ -725,8 +757,8 @@ impl Header {
 
     /// True if the samples come out of a demodulation (on board or in
     /// software): phase, arctan, amplitude, I or Q, or a pair of them. From
-    /// the content type; from the `DEMODULATED` flag for content type 0, an
-    /// unassigned value or a contradicted `sample_size`.
+    /// the content type; from the `DEMODULATED` flag when the mode comes
+    /// from the flags (`mode_from_flags`).
     #[getter]
     fn is_demodulated(&self) -> bool {
         if self.quantity_from_flags() {
@@ -738,8 +770,8 @@ impl Header {
     }
 
     /// True if the samples are (or include, as member 0 of a pair) a phase in
-    /// radians. From the content type; from the `PHASE` flag for content
-    /// type 0, an unassigned value or a contradicted `sample_size`.
+    /// radians. From the content type; from the `PHASE` flag when the mode
+    /// comes from the flags (`mode_from_flags`).
     #[getter]
     fn is_phase(&self) -> bool {
         if self.quantity_from_flags() {
@@ -769,27 +801,30 @@ impl Header {
     ///   value this SDK does not know, `False` for every other content type.
     /// * A capture written before `content_type` existed (`0`) keeps the
     ///   flag-based answer: `None` when `DEMODULATED` is clear, else whether
-    ///   the `MOZART` bit is set.
+    ///   the `MOZART` bit is set. So do the files written before v1 whose
+    ///   content type does not describe them: a `sw_custom` (12) file of an
+    ///   older Sandbox and an unpaired file of a stream-only value (see
+    ///   `mode_from_flags`).
     ///
     /// `False` only says "not Mozart"; it names no other pipeline (the
     /// `SCHUBERT` flag is deprecated). Treat `None` as "not applicable",
     /// never as a default.
     #[getter]
     fn is_mozart(&self) -> Option<bool> {
-        match self.content_type {
-            0 => (self.flags & flag_bits::DEMODULATED != 0)
-                .then_some(self.flags & flag_bits::MOZART != 0),
-            ct => match content::info(ct) {
-                None => None,
-                Some(i) if i.quantity == Some("raw") => None,
-                Some(i) => Some(matches!(i.method, Some("MOZART" | "MOZART_PLUS"))),
-            },
+        if self.content_type == 0 || self.pre_v1_custom() || self.pre_v1_unpaired() {
+            return (self.flags & flag_bits::DEMODULATED != 0)
+                .then_some(self.flags & flag_bits::MOZART != 0);
+        }
+        match content::info(self.content_type) {
+            None => None,
+            Some(i) if i.quantity == Some("raw") => None,
+            Some(i) => Some(matches!(i.method, Some("MOZART" | "MOZART_PLUS"))),
         }
     }
 
     /// Physical spatial positions per pulse — `line_size / 2` for interleaved
-    /// pairs (see `is_interleaved`), `line_size` otherwise. Mirrors the
-    /// producer's `positions_per_line`.
+    /// pairs (see `is_interleaved`), `line_size` otherwise. Mirrors
+    /// Audace-Lib's `header::file_positions_per_line`.
     #[getter]
     fn positions_per_line(&self) -> i32 {
         if self.interleaved() {

@@ -184,9 +184,12 @@ class Mode(Enum):
     def from_header(cls, h: Header) -> "Mode":
         """The mode of a file of header ``h``: from its content type; from
         its flags (:meth:`from_flags`) for content type 0, a value this SDK
-        does not know, a ``sample_size`` the content type contradicts, or a
+        does not know, a ``sample_size`` the content type contradicts, a
         ``sw_custom`` file of a Sandbox older than data format v1, which
-        kept its input's flags (``Header.mode_from_flags``)."""
+        kept its input's flags, and a file written before v1 under a
+        stream-only content type without the INTERLEAVED flag — an archive
+        export of the console, which kept its source's header over one
+        column per zone (``Header.mode_from_flags``)."""
         if h.mode_from_flags:
             return cls.from_flags(h.flags)
         ct = h.normalized_content_type
@@ -883,8 +886,10 @@ class File:
         ``"phase"``, ``"arctan"``, ``"amplitude"``, ``"i"``, ``"q"``,
         ``"custom"``, ``"variance"``, ``"log_variance"`` — or both members
         of a file of pairs (``"phase+amplitude"``). ``None`` when the
-        content type does not say (content type 0: see :attr:`mode`; a value
-        this SDK does not know)."""
+        content type does not say and :attr:`mode` comes from the flags
+        (``Header.mode_from_flags``): content type 0, a value this SDK does
+        not know, a file written before data format v1 whose content type
+        does not describe it."""
         return _join_members(self._header, "quantity")
 
     @property
@@ -893,7 +898,8 @@ class File:
         ``"count"`` (the card's integer scale), ``"adc_count"``,
         ``"front_end_count"``, ``"source_unit_squared"``,
         ``"dimensionless"``, ``"script"`` — or ``"rad+count"`` for a file of
-        pairs; ``None`` when the content type does not say."""
+        pairs; ``None`` when the content type does not say (see
+        :attr:`quantity`)."""
         return _join_members(self._header, "unit")
 
     @property
@@ -967,7 +973,11 @@ class File:
           other one.
         * A capture written before the content type existed (``0``) keeps
           the flag-based answer: ``None`` when the ``DEMODULATED`` bit is
-          clear, else whether the ``MOZART`` bit is set.
+          clear, else whether the ``MOZART`` bit is set. So do the files
+          written before data format v1 whose content type does not
+          describe them: a ``sw_custom`` file of an older Sandbox and an
+          archive export of the console under a stream-only value without
+          the INTERLEAVED flag (see :meth:`Mode.from_header`).
 
         ``False`` only says "not Mozart" — it names no other pipeline (the
         ``SCHUBERT`` flag is deprecated). Treat ``None`` as "not
@@ -979,9 +989,10 @@ class File:
     def dtype(self) -> np.dtype:
         """numpy dtype :meth:`read_lines` returns: the content type's sample
         type (``int16``, ``uint16`` — a magnitude —, ``float32``); for a file
-        written before the content type existed, ``(sample_size, FLOAT)``,
-        signed integers except a single-column ``UNSIGNED`` file
-        (``uint16``) and 1-byte samples (``uint8``)."""
+        written before the content type existed (and the files whose mode
+        comes from the flags, see :meth:`Mode.from_header`),
+        ``(sample_size, FLOAT)``, signed integers except a single-column
+        ``UNSIGNED`` file (``uint16``) and 1-byte samples (``uint8``)."""
         return _dtype_for(self._header)
 
     @property
@@ -1545,10 +1556,12 @@ def _warn_about_the_header(path: Path, h: Header) -> None:
 def _join_members(h: Header, field: str) -> Optional[str]:
     """A registry column (``quantity`` / ``unit``) of a header's content
     type: the value, or ``m0+m1`` for a pair; ``None`` when the content type
-    does not say (0, unknown, contradicted)."""
+    does not say what the samples are and the mode comes from the flags
+    (``Header.mode_from_flags``: 0, unknown, contradicted, a pre-v1
+    ``sw_custom`` file, a pre-v1 unpaired file of a stream-only value)."""
     ct = h.normalized_content_type
     info = _content.info(ct)
-    if ct == 0 or info is None or h.sample_size_contradicts_content_type:
+    if h.mode_from_flags:
         return None
     if info.members is not None:
         return "+".join(getattr(m, field) for m in info.members)
@@ -1557,11 +1570,13 @@ def _join_members(h: Header, field: str) -> Optional[str]:
 
 def _amplitude_unit(h: Header) -> Optional[str]:
     """The unit of a header's amplitude (the column, or the amplitude member
-    of a pair); ``"count"`` for a file described by its flags (written
-    before the content type existed: always the card's magnitude)."""
+    of a pair); ``"count"`` for a file described by its flags
+    (``Header.mode_from_flags``: written before the content type existed,
+    or before v1 under a content type that does not describe it — always
+    the card's magnitude)."""
     ct = h.normalized_content_type
     info = _content.info(ct)
-    if ct == 0 or info is None or h.sample_size_contradicts_content_type:
+    if h.mode_from_flags:
         return "count"
     if info.members is not None:
         k = _content.member_of(ct, "amplitude")
