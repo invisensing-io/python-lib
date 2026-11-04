@@ -54,20 +54,28 @@ with File("acquisition.h5") as f:
     print(f"{f.duration:.1f}s of recording, {f.distance:.0f}m of fibre")
     print(f.content_type_name, f.card, f.spatial_step_m)
 
-    match f.mode:
-        case Mode.RAW:
-            data = f.read_lines(1000)              # (1000, line_size) ADC codes
-        case Mode.PHASE:
-            phase = f.get_phase()                  # float32 radians
-        case Mode.AMPLITUDE:
-            magnitude = f.get_magnitude_volts()    # float32 volts
-        case Mode.ARCTAN:
-            arctan = f.get_arctan_radians()        # float32 radians
-        case Mode.I | Mode.Q:
-            column = f.read_lines(1000)            # int16
-        case Mode.IQ:                              # pairs: files before data format v1
-            iq = f.get_iq_volts()                  # complex64, in volts
+    mode = f.mode
+    if mode is Mode.RAW:
+        data = f.read_lines(1000)                  # (1000, line_size) ADC codes
+    elif mode is Mode.PHASE:
+        phase = f.get_phase()                      # float32 radians
+    elif mode is Mode.AMPLITUDE:
+        lines = f.read_lines(1000)
+        amplitude = f.get_amplitude(lines)         # uint16 or float32, in f.unit
+        if f.unit == "count":                      # the card's magnitude, also in volts
+            volts = f.get_magnitude_volts(lines)   # float32 volts
+    elif mode is Mode.ARCTAN:
+        arctan = f.get_arctan_radians()            # float32 radians
+    elif mode in (Mode.I, Mode.Q):
+        column = f.read_lines(1000)                # int16
+    elif mode is Mode.IQ:                          # pairs: files before data format v1
+        iq = f.get_iq_volts()                      # complex64, in volts
 ```
+
+(`if` / `elif` rather than `match`: the SDK supports Python 3.9.)
+`get_magnitude_volts()` converts the card's magnitude only (unit
+`"count"`); a software front end's amplitude (`sw_amplitude_sac`, unit
+`"front_end_count"`) is on another scale and is refused.
 
 That's the whole API surface for 95% of use cases. The
 [**Guide**](guide.md) walks through each piece in detail; the

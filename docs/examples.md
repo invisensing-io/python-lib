@@ -159,21 +159,24 @@ positions)` `float32` array:
 
 ```python
 def physical_amplitude(f: File) -> np.ndarray:
-    """Return the per-position amplitude (V) for any mode."""
-    match f.mode:
-        case Mode.RAW:
-            # ADC codes → volts via the range field.
-            return f.read_lines(f.lines_left).astype(np.float32) * (f.range / 32768)
-        case Mode.IQ:
-            return np.abs(f.get_iq_volts())
-        case Mode.ARCTAN_MAGNITUDE | Mode.AMPLITUDE:
-            return f.get_magnitude_volts()
-        case Mode.PHASE:
-            # Phase has no amplitude — return zeros to keep the
-            # caller's shape contract.
-            return np.zeros(f.spatial_shape, dtype=np.float32)
-        case _:
-            raise ValueError(f"Unsupported mode: {f.mode}")
+    """Return the per-position amplitude (V) of the lines left, for any
+    mode whose amplitude is on the ADC's scale."""
+    n = f.lines_left
+    mode = f.mode
+    if mode is Mode.RAW:
+        # ADC codes → volts via the range field.
+        return f.read_lines(n).astype(np.float32) * np.float32(f.range / 32768)
+    if mode is Mode.IQ:
+        return np.abs(f.get_iq_volts(n=n))
+    if mode is Mode.ARCTAN_MAGNITUDE or (mode is Mode.AMPLITUDE and f.unit == "count"):
+        # The card's magnitude. A software front end's amplitude
+        # (unit "front_end_count") is on another scale: refused.
+        return f.get_magnitude_volts(n=n)
+    if mode is Mode.PHASE:
+        # Phase has no amplitude — return zeros to keep the
+        # caller's shape contract.
+        return np.zeros((n, f.positions_per_line), dtype=np.float32)
+    raise ValueError(f"Unsupported mode: {f.mode}")
 
 with File("any.dat") as f:
     amp = physical_amplitude(f)
@@ -225,10 +228,17 @@ with File("acquisition.h5") as f:
 
 The whole header goes along — content type, card, steps, trigger
 pre-roll, the card's rational, the start time (of line `start`) — and
-the samples are written verbatim. A file of data format v1 stays v1
-(with the duration of the lines written); a file written before keeps
-its header as it is. `export_dat(path, data, header=f.header)` does the
-same for an array you computed.
+the samples are written verbatim. A file whose content type is a
+single-column value of the registry is written as a file of data format
+v1 — also when it was written before v1: version 1, only the AC and HIZ
+flags (FLOAT and UNSIGNED too for `sw_custom`), the steps filled, the
+duration of the lines written. Every other file is written as a legacy
+copy, with its content type, flags and version as they are (FLOAT
+follows the dtype of the data) and its card as a code: content type 0, a
+file of pairs, a content type this SDK does not know or whose sample size
+it contradicts, and an older file under a paired content type without
+the INTERLEAVED flag (a console archive export). `export_dat(path, data,
+header=f.header)` does the same for an array you computed.
 
 ---
 

@@ -7,8 +7,24 @@ platform. It handles every file format the platform writes (`.dat`,
 the channels each file actually contains — `phase` / `amplitude` /
 `arctan` / `I` / `Q` / raw samples — in one method call, with the right
 dtype and optional physical-unit scaling. What a file holds comes from its
-**content type** (data format v1, see below); files written before it are
-read from their header flags, exactly as before.
+**content type** (data format v1, see below). A file written before the
+content type existed (content type 0) is read from its header flags as
+1.3.0 read it, except that:
+
+- a single column flagged `UNSIGNED` reads as unsigned integers (`uint16`
+  for 2-byte samples) instead of signed;
+- `File.distance` uses the producer's 2·10⁸ m/s in the fibre: distances
+  are 3.3 % shorter than 1.3.0's;
+- a SEG-Y file's textual header (ASCII or EBCDIC) is read, and its integer
+  samples at their own width;
+- `File.dtype` is the dtype `read_lines()` returns.
+
+A file written between June 2026 and data format v1 that carries a
+content type is classified by it — except a `sw_custom` file of an older
+Sandbox and a console archive export under a paired content type without
+the `INTERLEAVED` flag, which are read from their flags.
+[CHANGELOG.md](https://github.com/invisensing-io/python-lib/blob/master/CHANGELOG.md)
+lists every change since 1.3.0.
 
 The library is **format-agnostic but mode-faithful**: it never
 silently re-derives one demodulation product from another. The
@@ -54,25 +70,28 @@ with File("phase/2026-11-03_10-00-00.h5") as f:
     print(f.distance, "m of fibre")
 
     # The Mode enum lets you dispatch cleanly on what the file contains.
-    match f.mode:
-        case Mode.RAW:
-            data = f.read_lines(1000)              # (1000, line_size) ADC codes
-        case Mode.PHASE:
-            phase = f.get_phase()                  # (n, positions) f32 radians
-        case Mode.AMPLITUDE:
-            amplitude = f.get_amplitude()          # (n, positions) u16 or f32
-        case Mode.ARCTAN:
-            rad = f.get_arctan_radians()           # (n, positions) f32 radians
-        case Mode.I | Mode.Q:
-            column = f.read_lines(1000)            # (n, positions) i16
-        # Files written before data format v1 may hold pairs:
-        case Mode.IQ:
-            iq = f.get_iq()                        # (n, positions) complex64
-        case Mode.ARCTAN_MAGNITUDE:
-            arctan, magnitude = f.get_arctan(), f.get_magnitude()
-        case Mode.PHASE_AMPLITUDE:
-            phase, amplitude = f.get_phase(), f.get_amplitude()
+    mode = f.mode
+    if mode is Mode.RAW:
+        data = f.read_lines(1000)                  # (1000, line_size) ADC codes
+    elif mode is Mode.PHASE:
+        phase = f.get_phase()                      # (n, positions) f32 radians
+    elif mode is Mode.AMPLITUDE:
+        amplitude = f.get_amplitude()              # (n, positions) u16 or f32
+    elif mode is Mode.ARCTAN:
+        rad = f.get_arctan_radians()               # (n, positions) f32 radians
+    elif mode in (Mode.I, Mode.Q):
+        column = f.read_lines(1000)                # (n, positions) i16
+    # Files written before data format v1 may hold pairs:
+    elif mode is Mode.IQ:
+        iq = f.get_iq()                            # (n, positions) complex64
+    elif mode is Mode.ARCTAN_MAGNITUDE:
+        arctan, magnitude = f.get_arctan(), f.get_magnitude()
+    elif mode is Mode.PHASE_AMPLITUDE:
+        phase, amplitude = f.get_phase(), f.get_amplitude()
 ```
+
+The examples use `if` / `elif`: the SDK supports Python 3.9, which has no
+`match` statement.
 
 ## Streaming large files
 
@@ -140,7 +159,8 @@ before writing, so consumers never need to know the card's scaling.
 
 `f.dtype` always reflects what `read_lines()` will return: the content
 type's sample type (`int16`, `uint16`, `float32`); on a file written before
-the content type existed, `sample_size` and the `FLOAT` / `UNSIGNED` flags.
+the content type existed (and the older files read from their flags),
+`sample_size` and the `FLOAT` / `UNSIGNED` flags.
 
 ### When to pick which
 
@@ -168,9 +188,11 @@ complex64 in `get_iq_volts`).
 ## Channel extractors — what they mean per mode
 
 `file.mode` comes from the file's content type (from its header flags
-on a file written before the content type existed, and on a `sw_custom`
+on a file written before the content type existed, on a `sw_custom`
 file of a Sandbox older than data format v1, which kept its input's
-flags: `f.header.mode_from_flags`). Since data format v1
+flags, and on a console archive export written before v1 under a paired
+content type without the `INTERLEAVED` flag, which kept its source's
+header over one column per zone: `f.header.mode_from_flags`). Since data format v1
 a recording holds **one quantity per file**: an interleaved product of the
 card or of the demodulation is split into two files, same name, sibling
 directories (`phase/` + `amplitude/`, `arctan/` + `magnitude/`,

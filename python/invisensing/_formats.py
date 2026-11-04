@@ -134,7 +134,9 @@ def _card(value) -> Optional[str]:
 
 
 def _step(value: Optional[float]) -> float:
-    """A step attribute: finite and positive, else ``0.0`` (absent)."""
+    """A step attribute for ``Header``: the value :func:`_positive_float_attr`
+    returned (which keeps only a finite, strictly positive number), or
+    ``0.0`` (absent) for its ``None``. It filters nothing itself."""
     return value if value is not None else 0.0
 
 

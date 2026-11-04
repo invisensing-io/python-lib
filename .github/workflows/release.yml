@@ -2,9 +2,10 @@
 #
 # Trigger:
 #   - Push a tag matching `v*` (e.g. `v1.0.0`) → CI builds wheels for
-#     Linux x86_64/aarch64 + macOS x86_64/arm64 + Windows x86_64 across
-#     CPython 3.9–3.13, plus the source distribution, then uploads them
-#     all to PyPI in a single atomic publish step.
+#     Linux x86_64/aarch64 + macOS arm64 + Windows x86_64 across
+#     CPython 3.9–3.14, plus the source distribution, then uploads them
+#     all to PyPI in a single atomic publish step. The annotated tag's
+#     message becomes the GitHub Release text (job `github-release`).
 #
 # Authentication:
 #   - Uses **PyPI Trusted Publishing (OIDC)** — no API token to manage,

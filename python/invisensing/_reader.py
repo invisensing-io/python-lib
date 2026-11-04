@@ -98,20 +98,30 @@ _LIGHT_SPEED_IN_FIBER = 200_000_000  # m/s
 class Mode(Enum):
     """
     What a file holds, and therefore which extractor reads it. Derived from
-    the file's **content type** (:attr:`File.content_type`) — on a file
-    written before the content type existed (``content_type == 0``), from
-    its header flags, exactly as before — so a script can dispatch with one
-    ``match`` statement instead of bit-twiddling::
+    the file's **content type** (:attr:`File.content_type`) — from its
+    header flags, exactly as before, on a file written before the content
+    type existed (``content_type == 0``) and on the few files written
+    before data format v1 whose content type does not describe them
+    (``Header.mode_from_flags``) — so a script can dispatch on it instead of
+    bit-twiddling::
 
-        match file.mode:
-            case Mode.RAW:              samples = file.read_lines(n)
-            case Mode.PHASE:            phase   = file.get_phase()
-            case Mode.AMPLITUDE:        amp     = file.get_amplitude()
-            case Mode.ARCTAN:           rad     = file.get_arctan_radians()
-            case Mode.I | Mode.Q:       column  = file.read_lines(n)
-            case Mode.IQ:               i, q    = file.get_i(), file.get_q()
-            case Mode.ARCTAN_MAGNITUDE: a, m    = file.get_arctan(), file.get_magnitude()
-            case Mode.PHASE_AMPLITUDE:  p, m    = file.get_phase(), file.get_amplitude()
+        mode = file.mode
+        if mode is Mode.RAW:
+            samples = file.read_lines(n)
+        elif mode is Mode.PHASE:
+            phase = file.get_phase()
+        elif mode is Mode.AMPLITUDE:
+            amp = file.get_amplitude()
+        elif mode is Mode.ARCTAN:
+            rad = file.get_arctan_radians()
+        elif mode in (Mode.I, Mode.Q):
+            column = file.read_lines(n)
+        elif mode is Mode.IQ:
+            i, q = file.get_i(), file.get_q()
+        elif mode is Mode.ARCTAN_MAGNITUDE:
+            a, m = file.get_arctan(), file.get_magnitude()
+        elif mode is Mode.PHASE_AMPLITUDE:
+            p, m = file.get_phase(), file.get_amplitude()
 
     Since data format v1 every recording holds one quantity per file: an
     interleaved stream is split into two files (``phase/`` and
@@ -874,8 +884,11 @@ class File:
     @property
     def temporal_step_s(self) -> Optional[float]:
         """Seconds between two lines: the file's own value when it carries
-        one, else the card's real line period (``1 / trig_frequency_real_hz``),
-        else ``None``. Informative — times come from :meth:`line_time_ns`."""
+        one (data format v1), else the line period of the header's cadence
+        (``Header.derived_temporal_step_s``: ``trig_period_ticks /
+        trig_clock_hz`` on the card's rational when the header carries a
+        consistent one, else ``1 / trig_frequency``), else ``None``.
+        Informative — times come from :meth:`line_time_ns`."""
         h = self._header
         step = h.temporal_step_s or h.derived_temporal_step_s
         return step or None

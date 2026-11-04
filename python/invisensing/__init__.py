@@ -19,13 +19,18 @@ The recommended modern usage::
     from invisensing import File, Mode
 
     with File("phase/2026-11-03_10-00-00.h5") as f:
-        match f.mode:
-            case Mode.PHASE:            phase = f.get_phase()
-            case Mode.AMPLITUDE:        amp   = f.get_amplitude()
-            case Mode.ARCTAN:           rad   = f.get_arctan_radians()
-            case Mode.IQ:               i, q  = f.get_i(), f.get_q()
-            case Mode.ARCTAN_MAGNITUDE: a, m  = f.get_arctan(), f.get_magnitude()
-            case Mode.RAW:              data  = f.read_lines(1000)
+        if f.mode is Mode.PHASE:
+            phase = f.get_phase()
+        elif f.mode is Mode.AMPLITUDE:
+            amp = f.get_amplitude()
+        elif f.mode is Mode.ARCTAN:
+            rad = f.get_arctan_radians()
+        elif f.mode is Mode.IQ:
+            i, q = f.get_i(), f.get_q()
+        elif f.mode is Mode.ARCTAN_MAGNITUDE:
+            a, m = f.get_arctan(), f.get_magnitude()
+        elif f.mode is Mode.RAW:
+            data = f.read_lines(1000)
 
 The legacy SDK is preserved verbatim::
 
