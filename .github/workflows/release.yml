@@ -192,6 +192,13 @@ jobs:
         with:
           fetch-depth: 0    # need full history + tags for `gh release create`
 
+      # actions/checkout replaces the pushed tag by a lightweight tag on its
+      # commit, so `%(contents)` gave the commit message (v1.4.0's Release
+      # text was its last commit's message). Fetch the tag object again so
+      # its own message is read.
+      - name: Fetch the annotated tag
+        run: git fetch --force origin "refs/tags/${GITHUB_REF_NAME}:refs/tags/${GITHUB_REF_NAME}"
+
       - name: Download wheels + sdist
         uses: actions/download-artifact@v4
         with:
