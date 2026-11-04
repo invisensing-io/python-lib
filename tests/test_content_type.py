@@ -814,3 +814,49 @@ def test_a_file_of_content_type_0_is_exported_as_a_legacy_copy(tmp_path):
         assert f.flags == FLAG_DEMODULATED | FLAG_HIZ | FLAG_INTERLEAVED | FLAG_UNSIGNED
         assert f.mode is Mode.ARCTAN_MAGNITUDE
         assert f.duration_s is None
+
+
+# ── export_dat takes its numbers as 1.3.0 did (int(), str()) ───────────────
+
+
+@pytest.mark.parametrize(
+    "fields,want",
+    [
+        (dict(sample_rate=250e6, trig_frequency=2e3), dict(sample_rate=250_000_000, trig_frequency=2_000)),
+        (dict(sample_rate=np.float64(250e6), trig_frequency=np.float64(2_000)),
+         dict(sample_rate=250_000_000, trig_frequency=2_000)),
+        (dict(sample_rate=np.int64(250_000_000), trig_frequency=np.int32(2_000)),
+         dict(sample_rate=250_000_000, trig_frequency=2_000)),
+        (dict(pulse_width=100.0, num_channels=np.int64(2), flags=np.int32(FLAG_AC)),
+         dict(pulse_width=100, num_channels=2, flags=FLAG_AC)),
+        (dict(range_v=np.float32(0.5), timestamp=np.str_("Tue Jun 23 11:08:11 2026")),
+         dict(range=500, timestamp="Tue Jun 23 11:08:11 2026")),
+        (dict(acquisition_ns=np.int64(1_790_000_000_000_000_000), card=np.str_("p21")),
+         dict(acquisition_ns=1_790_000_000_000_000_000, card="p21")),
+        # A fraction is dropped, as int() drops it.
+        (dict(sample_rate=125_000_000.7, pulse_width=99.9), dict(sample_rate=125_000_000, pulse_width=99)),
+    ],
+)
+def test_export_dat_takes_numbers_as_earlier_versions(tmp_path, fields, want):
+    path = tmp_path / "x.dat"
+    kw = dict(sample_rate=250_000_000, trig_frequency=2_000)
+    kw.update(fields)
+    export_dat(path, np.zeros((4, 8), np.int16), **kw)
+    with File(path) as f:
+        h = f.header
+        for name, value in want.items():
+            assert getattr(h, name) == value, name
+
+
+def test_export_dat_takes_numbers_with_a_header_and_a_content_type(tmp_path):
+    base = _header(content_type=1, sample_rate=125_000_000, line_size=8, format_version=1)
+    path = tmp_path / "x.dat"
+    export_dat(path, np.zeros((4, 8), np.int16), header=base, sample_rate=250e6,
+               trig_frequency=np.float64(500), content_type=np.uint8(1), flags=np.int64(FLAG_HIZ))
+    with File(path) as f:
+        assert (f.sample_rate, f.trig_frequency, f.content_type) == (250_000_000, 500, 1)
+        assert f.flags == FLAG_HIZ and f.format_version == 1
+    data = np.zeros((2, 4), np.float32)
+    export_dat(path, data, sample_rate=250e6, trig_frequency=1e3, content_type=np.float64(17))
+    with File(path) as f:
+        assert f.content_type_name == "dui_phase" and f.mode is Mode.PHASE

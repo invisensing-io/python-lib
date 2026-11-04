@@ -1828,7 +1828,10 @@ def export_dat(
       type 0 described by ``flags``, or, with ``content_type=``, a file of
       data format v1.
 
-    Keyword fields given with ``header=`` override its values.
+    Keyword fields given with ``header=`` override its values. As in earlier
+    versions, every integer field goes through ``int()`` (``250e6``, a
+    numpy scalar, ``100.0`` are taken; a fraction is dropped) and
+    ``timestamp`` and ``card`` through ``str()``.
 
     Parameters
     ----------
@@ -1882,19 +1885,26 @@ def export_dat(
     """
     if data.ndim != 2:
         raise ValueError(f"data must be 2-D (rows × line_size), got {data.ndim}-D")
+
+    def as_int(value):
+        # As 1.3.0 did: ``int(...)`` takes ``250e6``, numpy scalars and
+        # ``100.0`` (and truncates a fraction), which ``Header`` refuses.
+        return None if value is None else int(value)
+
     overrides = {
-        "sample_rate": sample_rate,
-        "trig_frequency": trig_frequency,
-        "range": None if range_v is None else int(round(range_v * 1000)),
-        "timestamp": timestamp,
-        "flags": flags,
-        "pulse_width": pulse_width,
-        "num_channels": num_channels,
-        "content_type": content_type,
-        "card": card,
-        "acquisition_ns": acquisition_ns,
+        "sample_rate": as_int(sample_rate),
+        "trig_frequency": as_int(trig_frequency),
+        "range": None if range_v is None else int(round(float(range_v) * 1000)),
+        "timestamp": None if timestamp is None else str(timestamp),
+        "flags": as_int(flags),
+        "pulse_width": as_int(pulse_width),
+        "num_channels": as_int(num_channels),
+        "content_type": as_int(content_type),
+        "card": None if card is None else str(card),
+        "acquisition_ns": as_int(acquisition_ns),
     }
     overrides = {k: v for k, v in overrides.items() if v is not None}
+    content_type = overrides.get("content_type")
     if header is None:
         if sample_rate is None or trig_frequency is None:
             raise ValueError("export_dat needs sample_rate and trig_frequency (or header=)")
