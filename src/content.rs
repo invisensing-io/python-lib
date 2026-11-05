@@ -91,8 +91,8 @@ pub struct ContentInfo {
     pub unit: Option<&'static str>,
     pub conversion: Option<Conversion>,
     /// The demodulation method that produced it (the acquisition's
-    /// `DemodMethod` name), `None` for card values and the values no method
-    /// produces.
+    /// `DemodMethod` name), `None` for card values, the magnitudes several
+    /// methods write (11, 16) and the values no method produces.
     pub method: Option<&'static str>,
     pub placement: Placement,
     /// The two members of a stream-only value, member 0 first on the wire.
@@ -165,10 +165,13 @@ pub const ARCTAN_RAD_PER_COUNT: f64 = std::f64::consts::PI / 32768.0;
 
 const PHASE_DUI: Member = member("phase", F32, "rad", "phase", 17);
 const AMPLITUDE_F32: Member = member("amplitude", F32, "count", "amplitude", 16);
+/// The software front end's magnitude `|u|` (11): the amplitude member of the
+/// pairs computed on the software arctan (15, 31, 32).
+const AMPLITUDE_FRONT_END: Member = member("amplitude", F32, "front_end_count", "amplitude", 11);
 
-/// The registry, indexed by value (`REGISTRY[v].value == v`): revision 2 of
-/// the producer's table (values 0 to 28).
-pub static REGISTRY: [ContentInfo; 29] = [
+/// The registry, indexed by value (`REGISTRY[v].value == v`): revision 4 of
+/// the producer's table (values 0 to 32).
+pub static REGISTRY: [ContentInfo; 33] = [
     ContentInfo {
         value: 0,
         tag: "undefined",
@@ -207,13 +210,15 @@ pub static REGISTRY: [ContentInfo; 29] = [
     ]),
     single(9, "sw_mozart", "phase", F32, "rad", Some("MOZART"), FileAndStream, "current"),
     single(10, "sw_phase_sac", "phase", F32, "rad", Some("PHASE_SAC"), FileAndStream, "new"),
-    single(11, "sw_amplitude_sac", "amplitude", F32, "front_end_count", Some("PHASE_SAC"), File, "new"),
+    // The software front end's magnitude: AMPLITUDE_ARCTAN's output, and the
+    // amplitude child of 15, 31 and 32 — several methods, so no single one.
+    single(11, "sw_amplitude_sac", "amplitude", F32, "front_end_count", None, FileAndStream, "new"),
     single(12, "sw_custom", "custom", FromFlags, "script", None, FileAndStream, "frozen"),
     single(13, "hw_i", "i", I16, "count", None, File, "current"),
     single(14, "hw_q", "q", I16, "count", None, File, "current"),
     pair(15, "interleaved_phase_sac_amplitude", 4, Some("PHASE_SAC"), "new", [
         member("phase", F32, "rad", "phase", 10),
-        member("amplitude", F32, "front_end_count", "amplitude", 11),
+        AMPLITUDE_FRONT_END,
     ]),
     single(16, "hw_amplitude_f32", "amplitude", F32, "count", None, FileAndStream, "new"),
     single(17, "dui_phase", "phase", F32, "rad", Some("DUI"), FileAndStream, "new"),
@@ -237,6 +242,18 @@ pub static REGISTRY: [ContentInfo; 29] = [
         single(28, "viz_logvar", "log_variance", F32, "dimensionless", None, File, "new"),
         Conversion { to: "source_unit_squared", expr: "10^v - 1", multiply_by: None, informative: false },
     ),
+    // DUI and DUI_STATEFUL on the software arctan (revision 4): their own
+    // phase values, and their pairs with the software front end's magnitude.
+    single(29, "dui_arctan_phase", "phase", F32, "rad", Some("DUI_ARCTAN"), FileAndStream, "new"),
+    single(30, "dui_stateful_arctan_phase", "phase", F32, "rad", Some("DUI_STATEFUL_ARCTAN"), FileAndStream, "new"),
+    pair(31, "interleaved_dui_arctan_phase_amplitude", 4, Some("DUI_ARCTAN"), "new", [
+        member("phase", F32, "rad", "phase", 29),
+        AMPLITUDE_FRONT_END,
+    ]),
+    pair(32, "interleaved_dui_stateful_arctan_phase_amplitude", 4, Some("DUI_STATEFUL_ARCTAN"), "new", [
+        member("phase", F32, "rad", "phase", 30),
+        AMPLITUDE_FRONT_END,
+    ]),
 ];
 
 /// The registry row of a content type byte; `None` for an unassigned value.
@@ -244,7 +261,7 @@ pub fn info(v: u8) -> Option<&'static ContentInfo> {
     REGISTRY.get(v as usize)
 }
 
-/// Stream-only (interleaved) values: 6, 7, 8, 15, 20, 21, 22.
+/// Stream-only (interleaved) values: 6, 7, 8, 15, 20, 21, 22, 31, 32.
 pub fn is_stream_only(v: u8) -> bool {
     info(v).is_some_and(|i| i.members.is_some())
 }

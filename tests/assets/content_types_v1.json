@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "revision": 3,
+ "revision": 4,
  "format_version": 1,
  "spec": "Audace-Lib/docs/DATA_FORMAT.md",
  "light_speed_in_fiber_m_s": 200000000,
@@ -488,13 +488,13 @@
    "sample_size": 4,
    "unit": "front_end_count",
    "conversion": null,
-   "chain": "Demodulation: PHASE_SAC software magnitude",
-   "method": "PHASE_SAC",
-   "file_or_stream": "file",
+   "chain": "Demodulation: software front-end magnitude |u|",
+   "method": null,
+   "file_or_stream": "file+stream",
    "members": null,
    "split_children": null,
    "status": "new",
-   "notes": "renamed from sw_amplitude, never written before v1"
+   "notes": "renamed from sw_amplitude, never written before v1; AMPLITUDE_ARCTAN output; amplitude child of 15, 31, 32 (PHASE_SAC, DUI_ARCTAN, DUI_STATEFUL_ARCTAN)"
   },
   {
    "value": 12,
@@ -861,6 +861,110 @@
    "split_children": null,
    "status": "new",
    "notes": "v = log10(1 + max(variance, 0)), the variance of value 27 (Dashboard viz::Scale::Log); not audace-display's to_log_variance; one column per zone; spatial_step_m = the zone spacing, temporal_step_s = the archive row period"
+  },
+  {
+   "value": 29,
+   "tag": "dui_arctan_phase",
+   "rust_variant": "DuiArctanPhase",
+   "quantity": "phase",
+   "sample_type": "f32",
+   "sample_size": 4,
+   "unit": "rad",
+   "conversion": null,
+   "chain": "Demodulation: DUI_ARCTAN (DUI on the software arctan)",
+   "method": "DUI_ARCTAN",
+   "file_or_stream": "file+stream",
+   "members": null,
+   "split_children": null,
+   "status": "new",
+   "notes": null
+  },
+  {
+   "value": 30,
+   "tag": "dui_stateful_arctan_phase",
+   "rust_variant": "DuiStatefulArctanPhase",
+   "quantity": "phase",
+   "sample_type": "f32",
+   "sample_size": 4,
+   "unit": "rad",
+   "conversion": null,
+   "chain": "Demodulation: DUI_STATEFUL_ARCTAN (DUI_STATEFUL on the software arctan)",
+   "method": "DUI_STATEFUL_ARCTAN",
+   "file_or_stream": "file+stream",
+   "members": null,
+   "split_children": null,
+   "status": "new",
+   "notes": null
+  },
+  {
+   "value": 31,
+   "tag": "interleaved_dui_arctan_phase_amplitude",
+   "rust_variant": "InterleavedDuiArctanPhaseAmplitude",
+   "quantity": null,
+   "sample_type": null,
+   "sample_size": 4,
+   "unit": null,
+   "conversion": null,
+   "chain": "Demodulation: DUI_ARCTAN with amplitude kept",
+   "method": "DUI_ARCTAN",
+   "file_or_stream": "stream",
+   "members": [
+    {
+     "quantity": "phase",
+     "sample_type": "f32",
+     "unit": "rad",
+     "subdir": "phase",
+     "child": 29
+    },
+    {
+     "quantity": "amplitude",
+     "sample_type": "f32",
+     "unit": "front_end_count",
+     "subdir": "amplitude",
+     "child": 11
+    }
+   ],
+   "split_children": [
+    29,
+    11
+   ],
+   "status": "new",
+   "notes": null
+  },
+  {
+   "value": 32,
+   "tag": "interleaved_dui_stateful_arctan_phase_amplitude",
+   "rust_variant": "InterleavedDuiStatefulArctanPhaseAmplitude",
+   "quantity": null,
+   "sample_type": null,
+   "sample_size": 4,
+   "unit": null,
+   "conversion": null,
+   "chain": "Demodulation: DUI_STATEFUL_ARCTAN with amplitude kept",
+   "method": "DUI_STATEFUL_ARCTAN",
+   "file_or_stream": "stream",
+   "members": [
+    {
+     "quantity": "phase",
+     "sample_type": "f32",
+     "unit": "rad",
+     "subdir": "phase",
+     "child": 30
+    },
+    {
+     "quantity": "amplitude",
+     "sample_type": "f32",
+     "unit": "front_end_count",
+     "subdir": "amplitude",
+     "child": 11
+    }
+   ],
+   "split_children": [
+    30,
+    11
+   ],
+   "status": "new",
+   "notes": null
   }
  ],
  "sets": {
@@ -872,7 +976,9 @@
    17,
    18,
    19,
-   23
+   23,
+   29,
+   30
   ],
   "is_amplitude": [
    5,
@@ -886,7 +992,9 @@
    15,
    20,
    21,
-   22
+   22,
+   31,
+   32
   ],
   "legacy": [
    0,

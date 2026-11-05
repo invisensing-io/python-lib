@@ -10,12 +10,12 @@ Two values are not typed: ``0`` (a file written before the byte existed,
 described by its flags as it always was) and ``12`` (a script output typed
 by its flags).
 
-Stream-only values (6, 7, 8, 15, 20, 21, 22) carry two values per position
-(``[m0, m1, m0, m1, …]``). Recordings split them into two single-column
-files, one per member, in the member's sub-directory (``phase/`` and
-``amplitude/``, ``arctan/`` and ``magnitude/``, ``i_component/`` and
-``q_component/``); files written before data format v1 may still hold the
-pair.
+Stream-only values (6, 7, 8, 15, 20, 21, 22, 31, 32) carry two values per
+position (``[m0, m1, m0, m1, …]``). Recordings split them into two
+single-column files, one per member, in the member's sub-directory
+(``phase/`` and ``amplitude/``, ``arctan/`` and ``magnitude/``,
+``i_component/`` and ``q_component/``); files written before data format v1
+may still hold the pair.
 
 These helpers mirror the acquisition's own (same names, same answers) and
 are checked against the registry the acquisition publishes.
@@ -106,7 +106,8 @@ class ContentInfo(NamedTuple):
     unit: Optional[str]
     conversion: Optional[Conversion]
     #: The demodulation method that produced it (``"DUI_COHERENT"``…), or
-    #: ``None`` for a card value and the values no method produces.
+    #: ``None`` for a card value, the magnitudes several methods write (11,
+    #: 16) and the values no method produces.
     method: Optional[str]
     #: ``"file"``, ``"stream"`` or ``"file+stream"``.
     file_or_stream: str
@@ -188,7 +189,8 @@ def sample_size(ct: int) -> Optional[int]:
 
 
 def is_phase(ct: int) -> bool:
-    """A single column of phase, in radians (2, 4, 9, 10, 17, 18, 19, 23)."""
+    """A single column of phase, in radians (2, 4, 9, 10, 17, 18, 19, 23, 29,
+    30)."""
     return quantity_of(ct) == "phase"
 
 
@@ -198,8 +200,8 @@ def is_amplitude(ct: int) -> bool:
 
 
 def is_stream_only(ct: int) -> bool:
-    """A value that carries pairs (6, 7, 8, 15, 20, 21, 22): split into two
-    files by every recording since data format v1."""
+    """A value that carries pairs (6, 7, 8, 15, 20, 21, 22, 31, 32): split
+    into two files by every recording since data format v1."""
     return members(ct) is not None
 
 
@@ -222,7 +224,11 @@ def split_children(ct: int) -> Optional[tuple]:
 
 
 def method_of(ct: int) -> Optional[str]:
-    """The demodulation method that produced ``ct``, or ``None``."""
+    """The demodulation method that produced ``ct`` (``method_of(29) ==
+    "DUI_ARCTAN"``), or ``None``: for a card value, for the magnitudes
+    several methods write (``sw_amplitude_sac``, 11, the software front
+    end's; ``hw_amplitude_f32``, 16, the card's) and for the values no
+    method produces."""
     i = info(ct)
     return None if i is None else i.method
 

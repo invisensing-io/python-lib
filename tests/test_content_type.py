@@ -68,17 +68,17 @@ def _header(**kw) -> Header:
 
 # ── The registry, against the producer's ───────────────────────────────────
 
-#: The producer's registry, revision 3 (content types 0..28). To follow a
+#: The producer's registry, revision 4 (content types 0..32). To follow a
 #: new revision: `python tests/assets/derive_content_types_v1.py
 #: ../Audace-Lib/tests/fixtures/content_types_v1.json`, put the two SHA-256
 #: it prints below, and add the new rows to `src/content.rs`.
 ASSETS = Path(__file__).resolve().parent / "assets"
 REGISTRY_FIXTURE = ASSETS / "content_types_v1.json"
 #: SHA-256 of the derived copy beside these tests.
-REGISTRY_SHA256 = "ab130979168747191399281e2e1c8da66fd1d335b072c892ee3ca92f1cc5f09e"
-#: SHA-256 of the producer's file it was derived from (Audace-Lib 1e1b23e,
-#: `tests/fixtures/content_types_v1.json`, revision 3).
-UPSTREAM_REGISTRY_SHA256 = "add41b45efe6df4264a34d80298917d64c13eaf81febb207cd5a4f35e4d9f121"
+REGISTRY_SHA256 = "2c16f669fdfabf93a987580c393903c44abad167d58a8a936be3830071ac40cc"
+#: SHA-256 of the producer's file it was derived from (Audace-Lib 6188a56,
+#: `tests/fixtures/content_types_v1.json`, revision 4).
+UPSTREAM_REGISTRY_SHA256 = "75d3a747487d4866f52399a34d876a89e9f3d322f91830d3fecacb5da1b86a8f"
 #: The producer's file, when Audace-Lib is checked out beside python-lib.
 UPSTREAM_REGISTRY = (
     Path(__file__).resolve().parent.parent.parent
@@ -244,7 +244,7 @@ def test_a_tag_written_before_v1_maps_to_its_code(upstream_registry):
             assert (derive.tag_digest(tag), c["code"]) in LEGACY_CARD_DIGESTS
 
 
-@pytest.mark.parametrize("value", [29, 42, 254, 255])
+@pytest.mark.parametrize("value", [33, 42, 254, 255])
 def test_an_unknown_value_is_not_called_undefined(value):
     """``undefined`` means "written before the byte existed": a value from a
     newer producer is something else, and says which number it was."""
@@ -263,6 +263,41 @@ def test_the_v1_names():
     assert content.to_physical(3).multiply_by == math.pi / 32768
     assert content.to_physical(28).expr == "10^v - 1"
     assert content.to_physical(27) is None
+
+
+def test_the_software_arctan_values():
+    """Registry revision 4: the software front end (the band-pass at the beat
+    frequency, then the arctan and the magnitude, on the raw samples) feeds
+    DUI and DUI_STATEFUL too. Their phases have their own values (29, 30),
+    their pairs (31, 32) split into that phase and the software front end's
+    magnitude 11 — which AMPLITUDE_ARCTAN also streams on its own, so no
+    single method owns it."""
+    names = {29: "dui_arctan_phase", 30: "dui_stateful_arctan_phase",
+             31: "interleaved_dui_arctan_phase_amplitude",
+             32: "interleaved_dui_stateful_arctan_phase_amplitude"}
+    for value, tag in names.items():
+        assert CONTENT_TYPE_NAMES[value] == tag
+        assert content.from_tag(tag) == value
+    for value, method in [(29, "DUI_ARCTAN"), (30, "DUI_STATEFUL_ARCTAN"),
+                          (31, "DUI_ARCTAN"), (32, "DUI_STATEFUL_ARCTAN")]:
+        assert content.method_of(value) == method
+        assert content.info(value).status == "new"
+    for value in (29, 30):
+        assert content.is_phase(value) and content.is_file_value(value)
+        assert (content.sample_type(value), content.unit(value)) == ("f32", "rad")
+    assert content.split_children(31) == (29, 11)
+    assert content.split_children(32) == (30, 11)
+    for value in (31, 32):
+        assert content.is_stream_only(value) and not content.is_file_value(value)
+        assert content.member_of(value, "phase") == (0, "f32")
+        assert content.member_of(value, "amplitude") == (1, "f32")
+        assert content.members(value)[1].unit == "front_end_count"
+        assert content.members(value)[1].subdir == "amplitude"
+    # 11 is a stream value too now, and several methods write it.
+    eleven = content.info(11)
+    assert (eleven.file_or_stream, eleven.method) == ("file+stream", None)
+    assert content.is_amplitude(11) and content.unit(11) == "front_end_count"
+    assert content.method_of(15) == "PHASE_SAC" and content.split_children(15) == (10, 11)
 
 
 def test_the_dat_header_carries_the_content_type(tmp_path):
@@ -412,6 +447,8 @@ def test_is_mozart(tmp_path, flags, content_type, expected):
         (16, 4, Mode.AMPLITUDE, np.float32, True, False, False, True),
         (19, 4, Mode.PHASE, np.float32, True, False, True, True),
         (23, 4, Mode.PHASE, np.float32, True, False, True, True),
+        (29, 4, Mode.PHASE, np.float32, True, False, True, True),
+        (30, 4, Mode.PHASE, np.float32, True, False, True, True),
         (24, 2, Mode.CUSTOM, np.int16, False, False, False, False),
         (25, 2, Mode.CUSTOM, np.uint16, False, True, False, False),
         (26, 4, Mode.CUSTOM, np.float32, True, False, False, False),
@@ -650,6 +687,31 @@ def test_value_8_with_interleaved_or_of_version_1_stays_pairs(flags, format_vers
     assert Mode.from_header(h) is Mode.PHASE_AMPLITUDE
     assert h.sample_encoding == (4, True, False)
     assert h.is_mozart is False
+
+
+@pytest.mark.parametrize("ct", [31, 32])
+def test_a_software_arctan_pair_gives_its_phase_and_its_front_end_amplitude(tmp_path, ct):
+    """A capture of the DUI_ARCTAN / DUI_STATEFUL_ARCTAN stream with the
+    amplitude kept (a recording splits it; a capture of the wire keeps the
+    pair): the phase member, then the software front end's magnitude, which
+    is not on the ADC's scale and is never converted to volts."""
+    h = _header(content_type=ct, sample_size=4, line_size=8, flags=0, format_version=1)
+    assert not h.mode_from_flags
+    assert h.is_interleaved and h.positions_per_line == 4
+    assert Mode.from_header(h) is Mode.PHASE_AMPLITUDE
+    assert h.sample_encoding == (4, True, False)
+    assert h.is_phase and h.is_demodulated and h.is_mozart is False
+    phase = (np.arange(12, dtype=np.float32) / 10).reshape(3, 4)
+    amplitude = (np.arange(12, dtype=np.float32) + 100).reshape(3, 4)
+    pairs = np.stack([phase, amplitude], axis=-1).reshape(3, 8)
+    path = tmp_path / "pairs.dat"
+    path.write_bytes(build_header_bytes(h) + pairs.tobytes())
+    with File(path) as f:
+        buf = f.read_all()
+        np.testing.assert_array_equal(f.get_phase(buf), phase)
+        np.testing.assert_array_equal(f.get_amplitude(buf), amplitude)
+        with pytest.raises(ValueError, match="not the card's magnitude"):
+            f.get_magnitude_volts(buf)
 
 
 #: Two pre-v1 exports of the console (zone variances of a DUI keep-amplitude

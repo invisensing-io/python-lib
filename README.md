@@ -325,11 +325,16 @@ with File("acquisition.h5") as f:
     content.to_physical(3)                # arctan → rad: v · π / 32768
 ```
 
-`invisensing.content` is the registry (values 0–28) with the
+`invisensing.content` is the registry (values 0–32) with the
 acquisition's helpers (`quantity_of`, `members`, `member_of`,
 `sample_type`, `is_phase`, `is_stream_only`, `split_children`,
 `method_of`, `unit`, `to_physical`…); it is checked against the registry
-the acquisition publishes. A value this SDK does not know reads
+the acquisition publishes. Since 1.5.0 it knows the phases computed on the
+software front end by DUI and DUI_STATEFUL (`dui_arctan_phase` 29,
+`dui_stateful_arctan_phase` 30, `Mode.PHASE`) and their pairs with the
+amplitude kept (31, 32); the software front end's amplitude
+(`sw_amplitude_sac`, 11) has no single `method_of` any more, as several
+methods write it. A value this SDK does not know reads
 `unknown(<n>)` — never `undefined` — unless the file names it itself (HDF5
 / TDMS `content_type_name`, used by `f.content_type_name`), and its samples
 are decoded from `sample_size` and the flags, with a warning.

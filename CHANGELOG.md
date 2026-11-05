@@ -4,6 +4,40 @@ Changes to the `invisensing` package, one section per version published on
 PyPI. Each section lists what a script written for the previous version may
 see differently, then what is new.
 
+## 1.5.0
+
+Follows the producer's content-type registry to revision 4: the software
+front end (a band-pass at the beat frequency, then the arctan and the
+magnitude, computed from the raw samples) may now feed every demodulation
+method that read the card's arctan and magnitude.
+
+### Changed — behaviour that differs from 1.4.0
+
+- **`sw_amplitude_sac` (11) has no single method**: `content.method_of(11)`
+  and `content.info(11).method` are `None` (1.4.0: `"PHASE_SAC"`), as for
+  the card's `hw_amplitude_f32` (16) — the software front end's magnitude
+  is written by several methods (the AMPLITUDE method on the software
+  arctan streams it alone; PHASE_SAC, DUI and DUI_STATEFUL on the software
+  arctan keep it beside their phase). It is a stream value too:
+  `content.info(11).file_or_stream` is `"file+stream"` (1.4.0: `"file"`).
+  Its unit (`front_end_count`), sample type and reading are unchanged.
+- **Files of content type 29 to 32 are typed** where 1.4.0 named them
+  `unknown(<n>)`, read them from their flags and warned: 29
+  (`dui_arctan_phase`) and 30 (`dui_stateful_arctan_phase`) are
+  `Mode.PHASE`, `float32` radians, `is_phase`; a capture of the 31 / 32
+  stream is `Mode.PHASE_AMPLITUDE`, whose amplitude is the software front
+  end's (`get_magnitude_volts()` refuses it, as for 15).
+
+### Added
+
+- **Content types 29–32** in `invisensing.content` (registry revision 4):
+  `dui_arctan_phase` (29, method `DUI_ARCTAN`), `dui_stateful_arctan_phase`
+  (30, `DUI_STATEFUL_ARCTAN`), and the stream-only pairs
+  `interleaved_dui_arctan_phase_amplitude` (31, split into 29 + 11) and
+  `interleaved_dui_stateful_arctan_phase_amplitude` (32, split into
+  30 + 11). `is_phase` gives 2, 4, 9, 10, 17, 18, 19, 23, 29, 30;
+  `is_stream_only` 6, 7, 8, 15, 20, 21, 22, 31, 32.
+
 ## 1.4.0
 
 Reads the Audace data format v1: what a file holds comes from its content
