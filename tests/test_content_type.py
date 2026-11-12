@@ -23,6 +23,7 @@ import hashlib
 import importlib.util
 import json
 import math
+import re
 import warnings
 from pathlib import Path
 
@@ -170,13 +171,48 @@ def test_the_helpers_give_the_producer_s_sets(registry):
         assert content.is_file_value(v) == ("file" in e["file_or_stream"].split("+"))
 
 
+#: Header fields the producer writes that the registry's revision 4 does not
+#: list yet: ``gauge_length_m`` (Audace-Lib a5fccd5, DATA_FORMAT.md §3.4;
+#: §11 says the ``header`` list gains it with the next revision, which
+#: re-pins this copy anyway). Checked against Audace-Lib's source below; when
+#: the registry lists a field, it is compared there like any other and leaves
+#: this table.
+AHEAD_OF_THE_REGISTRY = {"gauge_length_m": (120, 4, "f32")}
+#: Audace-Lib's sources, when it is checked out beside python-lib.
+UPSTREAM_SRC = UPSTREAM_REGISTRY.parents[2] / "src"
+
+
 def test_the_header_layout_is_the_producer_s(registry):
     assert registry["header_size"] == HEADER_SIZE
     assert registry["format_version"] == FORMAT_VERSION
     assert registry["endianness"] == "little"
     theirs = {f["name"]: (f["offset"], f["size"], f["type"]) for f in registry["header"]}
     ours = {name: (offset, size, ty) for name, offset, size, ty in HEADER_LAYOUT}
+    listed = set(AHEAD_OF_THE_REGISTRY) & set(theirs)
+    assert not listed, f"the registry lists {sorted(listed)} now: drop them from AHEAD_OF_THE_REGISTRY"
+    ahead = {name: ours.pop(name) for name in AHEAD_OF_THE_REGISTRY}
+    assert ahead == AHEAD_OF_THE_REGISTRY
     assert ours == theirs
+    # Bytes no other field takes, inside the header.
+    taken = [(o, o + n) for o, n, _ in theirs.values()]
+    for name, (o, n, _) in ahead.items():
+        assert o + n <= HEADER_SIZE
+        assert all(o + n <= a or b <= o for a, b in taken), name
+
+
+@pytest.mark.skipif(
+    not (UPSTREAM_SRC / "header.rs").exists(),
+    reason="Audace-Lib is not checked out next to python-lib",
+)
+def test_the_fields_ahead_of_the_registry_are_the_producer_s():
+    """The registry does not list ``gauge_length_m`` yet: its offset and type
+    are read from the producer's own source instead (``GAUGE_LENGTH_OFF``,
+    ``DataHeader.gauge_length_m: f32``)."""
+    header_rs = (UPSTREAM_SRC / "header.rs").read_text()
+    types_rs = (UPSTREAM_SRC / "types.rs").read_text()
+    offset = int(re.search(r"pub const GAUGE_LENGTH_OFF: usize = (\d+);", header_rs).group(1))
+    ty = re.search(r"pub gauge_length_m: (\w+),", types_rs).group(1)
+    assert AHEAD_OF_THE_REGISTRY["gauge_length_m"] == (offset, 4, ty)
 
 
 def test_the_flag_bits_are_the_producer_s(registry):

@@ -24,6 +24,7 @@ data from it raises.
 
 from __future__ import annotations
 
+import math
 import operator
 import warnings
 from enum import Enum
@@ -916,6 +917,24 @@ class File:
         return _join_members(self._header, "unit")
 
     @property
+    def gauge_length_m(self) -> Optional[float]:
+        """The gauge length the producer applied to this phase, in metres of
+        fibre — the distance between the two ends of the differential gauge
+        as it was realised (a whole number of positions), not the length
+        the configuration asked for — or ``None`` when the file does not
+        record one.
+
+        Recorded since 2026-11 on a phase only (DAT header bytes 120..124,
+        HDF5 attribute and TDMS property ``gauge_length_m``, SEG-Y line
+        ``GAUGE LENGTH``). ``None`` for every file recorded before, for a
+        MOZART / MOZART_PLUS phase (its gauge is set by the optics, not by
+        software), for every non-phase file (raw, I/Q, arctan, amplitude,
+        variances: no gauge, whatever the header bytes hold) and for a file
+        whose mode comes from its flags (``Header.mode_from_flags``). The
+        value as stored is ``header.gauge_length_m``."""
+        return _gauge_of(self._header)
+
+    @property
     def source_content_type(self) -> Optional[int]:
         """An archive export of zone variances (content type 27 or 28, HDF5):
         the content type of the column the variance was computed from;
@@ -1167,7 +1186,7 @@ class File:
     ) -> None:
         """Write lines ``start .. start + count`` (default: to the end) to a
         ``.dat``, with this file's whole header: content type, card, steps,
-        trigger pre-roll, the card's rational, time flags (see
+        gauge length, trigger pre-roll, the card's rational, time flags (see
         :func:`export_dat`). The first line's time is :meth:`line_time_ns`
         of ``start`` — the corrected time on a file stamped from the card's
         time map. The data is copied ``chunk_lines`` lines at a time; the
@@ -1581,6 +1600,17 @@ def _join_members(h: Header, field: str) -> Optional[str]:
     return getattr(info, field)
 
 
+def _gauge_of(h: Header) -> Optional[float]:
+    """The gauge length of a phase (see :attr:`File.gauge_length_m`): the
+    header's, when its content type says the samples are a phase (a column,
+    or member 0 of pairs — a producer stamps the gauge on such a stream) and
+    the value is a length; ``None`` otherwise."""
+    g = float(h.gauge_length_m)
+    if not (math.isfinite(g) and g > 0.0) or h.mode_from_flags or not h.is_phase:
+        return None
+    return g
+
+
 def _amplitude_unit(h: Header) -> Optional[str]:
     """The unit of a header's amplitude (the column, or the amplitude member
     of a pair); ``"count"`` for a file described by its flags
@@ -1730,6 +1760,11 @@ def _file_header(h: Header, dtype: np.dtype, line_size: int, lines: int) -> Head
       it contradicts — is written as a **legacy copy**: content type, flags
       (FLOAT set from ``dtype``, as :func:`export_dat` always did), version,
       steps, card and duration as they are.
+
+    Either way the gauge length is kept on a phase content type only
+    (:func:`invisensing.content.is_phase`) and written 0 on every other —
+    the amplitude of a split pair, a raw file with a stray value, a legacy
+    copy, pairs — as the acquisition's writers do.
     """
     if not h.trig_frequency_is_exact:
         raise ValueError(
@@ -1739,9 +1774,13 @@ def _file_header(h: Header, dtype: np.dtype, line_size: int, lines: int) -> Head
             "recording in HDF5"
         )
     dtype = np.dtype(dtype)
-    geometry = dict(line_size=int(line_size), sample_size=int(dtype.itemsize))
     ct = h.normalized_content_type
     info = _content.info(ct)
+    geometry = dict(
+        line_size=int(line_size),
+        sample_size=int(dtype.itemsize),
+        gauge_length_m=h.gauge_length_m if _content.is_phase(ct) else 0.0,
+    )
     typed = (
         ct != 0
         and info is not None
@@ -1820,6 +1859,7 @@ def export_dat(
     content_type: Optional[int] = None,
     card: Optional[str] = None,
     acquisition_ns: Optional[int] = None,
+    gauge_length_m: Optional[float] = None,
 ) -> None:
     """
     Write a 2-D numpy array out as an Audace ``.dat`` file (128-byte
@@ -1887,12 +1927,17 @@ def export_dat(
         Time of the first line, ns since the Unix epoch (UTC): with
         ``header=``, the time of the first line written when it is not the
         source's first (``f.line_time_ns(start)``).
+    gauge_length_m
+        The gauge length the phase was measured over, metres (header bytes
+        120..124, stored as float32): a phase content type only.
 
     Raises
     ------
     ValueError
-        If ``data`` is not 2-D, if a required field is missing, or if the
-        data is not of the content type's sample type.
+        If ``data`` is not 2-D, if a required field is missing, if the
+        data is not of the content type's sample type, or if
+        ``gauge_length_m`` is given for a content type that is not a phase
+        or is not a length.
     OSError
         If the write fails.
     """
@@ -1915,9 +1960,22 @@ def export_dat(
         "content_type": as_int(content_type),
         "card": None if card is None else str(card),
         "acquisition_ns": as_int(acquisition_ns),
+        "gauge_length_m": None if gauge_length_m is None else float(gauge_length_m),
     }
     overrides = {k: v for k, v in overrides.items() if v is not None}
     content_type = overrides.get("content_type")
+    if gauge_length_m is not None:
+        g = overrides["gauge_length_m"]
+        ct = content_type if content_type is not None else (
+            header.normalized_content_type if header is not None else 0
+        )
+        if not _content.is_phase(ct):
+            raise ValueError(
+                f"gauge_length_m is written on a phase content type only, not on "
+                f"content type {ct} ({_content.info(ct).tag if _content.info(ct) else 'unknown'})"
+            )
+        if not (math.isfinite(g) and g > 0.0):
+            raise ValueError(f"gauge_length_m must be a length above zero, got {gauge_length_m!r}")
     if header is None:
         if sample_rate is None or trig_frequency is None:
             raise ValueError("export_dat needs sample_rate and trig_frequency (or header=)")

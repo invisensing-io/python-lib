@@ -63,7 +63,7 @@ HEADER_FIELDS = (
     "range", "pulse_width", "num_channels", "timestamp", "content_type",
     "acquisition_ns", "trigger_delay", "trig_clock_hz", "trig_period_ticks",
     "line_offset", "time_flags", "card", "duration_s", "format_version",
-    "spatial_step_m", "temporal_step_s",
+    "spatial_step_m", "temporal_step_s", "gauge_length_m",
 )
 
 
@@ -134,9 +134,10 @@ def _card(value) -> Optional[str]:
 
 
 def _step(value: Optional[float]) -> float:
-    """A step attribute for ``Header``: the value :func:`_positive_float_attr`
-    returned (which keeps only a finite, strictly positive number), or
-    ``0.0`` (absent) for its ``None``. It filters nothing itself."""
+    """A step (or gauge length) attribute for ``Header``: the value
+    :func:`_positive_float_attr` returned (which keeps only a finite,
+    strictly positive number), or ``0.0`` (absent) for its ``None``. It
+    filters nothing itself."""
     return value if value is not None else 0.0
 
 
@@ -544,6 +545,9 @@ class _Hdf5Backend:
             duration_s=_int_attr(attrs, "duration_s", 0, _U32_MAX),
             spatial_step_m=_step(_positive_float_attr(attrs, "spatial_step_m")),
             temporal_step_s=_step(_positive_float_attr(attrs, "temporal_step_s")),
+            # The gauge length the producer applied (2026-11), f64: written
+            # on a phase file with a known gauge only, absent otherwise.
+            gauge_length_m=_step(_positive_float_attr(attrs, "gauge_length_m")),
         )
         # `clock / ticks` as a float, for MATLAB / HDFView users. Normally
         # redundant with the rational above (same writer, same value); kept
@@ -691,6 +695,8 @@ class _TdmsBackend:
             duration_s=_int_attr(props, "duration_s", 0, _U32_MAX),
             spatial_step_m=_step(_positive_float_attr(props, "spatial_step_m")),
             temporal_step_s=_step(_positive_float_attr(props, "temporal_step_s")),
+            # The gauge length the producer applied (2026-11, phase only).
+            gauge_length_m=_step(_positive_float_attr(props, "gauge_length_m")),
         )
         # The writer's tag, which names a value this SDK does not know.
         self.content_type_name_attr = _str_attr(props, "content_type_name")
@@ -972,6 +978,9 @@ class _SegyBackend:
             duration_s=u32("DURATION"),
             spatial_step_m=step("SAMPLE SPACING ALONG THE FIBER"),
             temporal_step_s=step("TRACE SPACING IN TIME"),
+            # `C25 GAUGE LENGTH: <m> METRES` (2026-11, phase only, no line
+            # when absent).
+            gauge_length_m=step("GAUGE LENGTH"),
         )
 
         # Traces are read lazily, one chunk per `read_lines`, via segyio's

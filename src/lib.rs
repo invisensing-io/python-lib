@@ -115,14 +115,20 @@ mod offsets {
     pub const SPATIAL_STEP_M: usize = 112;
     /// f32 LE: seconds between two lines.
     pub const TEMPORAL_STEP_S: usize = 116;
+    /// f32 LE: the gauge length the producer applied to a phase, metres
+    /// (2026-11; zero = absent on every older capture and every non-phase
+    /// file). Audace-Lib `header::GAUGE_LENGTH_OFF`.
+    pub const GAUGE_LENGTH_M: usize = 120;
 }
 
 /// The data format version this SDK reads in full.
 const FORMAT_VERSION: u8 = 1;
 
 /// The header layout, as `(name, offset, size, type)`: what
-/// `tests/test_content_type.py` compares with the producer's registry.
-const HEADER_LAYOUT: [(&str, usize, usize, &str); 20] = [
+/// `tests/test_content_type.py` compares with the producer's registry
+/// (whose revision 4 predates `gauge_length_m`, Audace-Lib DATA_FORMAT.md
+/// §11: the test names it as the one field ahead of the registry).
+const HEADER_LAYOUT: [(&str, usize, usize, &str); 21] = [
     ("timestamp", offsets::TIMESTAMP, 32, "bytes"),
     ("line_size", offsets::LINE_SIZE, 4, "i32"),
     ("trig_frequency", offsets::TRIG_FREQUENCY, 4, "i32"),
@@ -143,6 +149,7 @@ const HEADER_LAYOUT: [(&str, usize, usize, &str); 20] = [
     ("format_version", offsets::FORMAT_VERSION, 1, "u8"),
     ("spatial_step_m", offsets::SPATIAL_STEP_M, 4, "f32"),
     ("temporal_step_s", offsets::TEMPORAL_STEP_S, 4, "f32"),
+    ("gauge_length_m", offsets::GAUGE_LENGTH_M, 4, "f32"),
 ];
 
 /// Bits of the header's `time_flags` (bytes 100..104) — must match the
@@ -336,6 +343,16 @@ pub struct Header {
     /// 116..120, same rule); `0.0` when absent. Informative: times come from
     /// the anchor, the card's rational and the time map, never from it.
     pub temporal_step_s: f64,
+    /// The gauge length the producer applied to a phase, metres of fibre
+    /// (2026-11), as the file stores it: DAT f32 bytes 120..124, read back
+    /// exactly as the f64 the other formats store (HDF5 attribute and TDMS
+    /// property `gauge_length_m`, SEG-Y line `GAUGE LENGTH`) — `k · 1e8 /
+    /// sample_rate` when the f32 is that value rounded, for a whole `k`
+    /// (Audace-Lib `exact_gauge_length_m`), so `float32(gauge_length_m)` is
+    /// the stored f32. `0.0` when absent (every file recorded before
+    /// 2026-11, every non-phase file). Kept as stored whatever the content
+    /// type; `File.gauge_length_m` answers it for a phase only.
+    pub gauge_length_m: f64,
 }
 
 /// The light speed in the fibre, halved for the round trip: one sample at
@@ -501,6 +518,26 @@ fn exact_step(field: f32, derived: f64) -> f64 {
     }
 }
 
+/// The gauge length a DAT stores (f32), in f64 — Audace-Lib
+/// `exact_gauge_length_m` without its phase filter: exactly `k · 1e8 /
+/// sample_rate` when the field is that value rounded to f32 for a whole
+/// `k ≥ 1`, the field otherwise; 0 when absent (0, negative, not finite).
+fn exact_gauge(field: f32, sample_rate: i32) -> f64 {
+    if !(field.is_finite() && field > 0.0) {
+        return 0.0;
+    }
+    if sample_rate > 0 {
+        let k = (f64::from(field) * sample_rate as f64 / METRES_PER_SAMPLE_HZ).round();
+        if (1.0..=1e15).contains(&k) {
+            let exact = k * METRES_PER_SAMPLE_HZ / sample_rate as f64;
+            if exact as f32 == field {
+                return exact;
+            }
+        }
+    }
+    f64::from(field)
+}
+
 /// The card code of a value given to `Header(card=…)`: a code, a tag written
 /// before v1 (mapped), `None` / `""` for none; anything else is refused.
 fn card_argument(card: Option<String>) -> PyResult<Option<String>> {
@@ -544,6 +581,7 @@ impl Header {
         format_version = 0,
         spatial_step_m = 0.0,
         temporal_step_s = 0.0,
+        gauge_length_m = 0.0,
     ))]
     #[allow(clippy::too_many_arguments)]
     fn new(
@@ -568,6 +606,7 @@ impl Header {
         format_version: u8,
         spatial_step_m: f64,
         temporal_step_s: f64,
+        gauge_length_m: f64,
     ) -> PyResult<Self> {
         let finite_or_zero = |v: f64| if v.is_finite() && v > 0.0 { v } else { 0.0 };
         Ok(Self {
@@ -592,6 +631,7 @@ impl Header {
             format_version,
             spatial_step_m: finite_or_zero(spatial_step_m),
             temporal_step_s: finite_or_zero(temporal_step_s),
+            gauge_length_m: finite_or_zero(gauge_length_m),
         })
     }
 
@@ -888,6 +928,9 @@ impl Header {
                 self.spatial_step_m, self.temporal_step_s
             ));
         }
+        if self.gauge_length_m != 0.0 {
+            timing.push_str(&format!(", gauge_length_m={}", self.gauge_length_m));
+        }
         format!(
             "Header(line_size={}, sample_size={}, sample_rate={}, trig_frequency={}{}, \
              flags=0x{:X}, positions_per_line={}, interleaved={}, float={}, unsigned={})",
@@ -970,12 +1013,14 @@ fn parse_header(bytes: &[u8]) -> PyResult<Header> {
         format_version: bytes[offsets::FORMAT_VERSION],
         spatial_step_m: 0.0,
         temporal_step_s: 0.0,
+        gauge_length_m: 0.0,
     };
-    // The steps are f32 here: read back exactly as the other formats store
-    // them (f64), see `exact_step`.
+    // The steps and the gauge are f32 here: read back exactly as the other
+    // formats store them (f64), see `exact_step` and `exact_gauge`.
     let (spatial, temporal) = h.derived_steps();
     h.spatial_step_m = exact_step(read_f32(offsets::SPATIAL_STEP_M), spatial);
     h.temporal_step_s = exact_step(read_f32(offsets::TEMPORAL_STEP_S), temporal);
+    h.gauge_length_m = exact_gauge(read_f32(offsets::GAUGE_LENGTH_M), h.sample_rate);
     Ok(h)
 }
 
@@ -1572,6 +1617,10 @@ fn build_header_bytes<'py>(py: Python<'py>, header: &Header) -> PyResult<Bound<'
         .copy_from_slice(&step(header.spatial_step_m).to_le_bytes());
     buf[offsets::TEMPORAL_STEP_S..offsets::TEMPORAL_STEP_S + 4]
         .copy_from_slice(&step(header.temporal_step_s).to_le_bytes());
+    // The gauge length (bytes 120..124), f32, zero when absent: written as
+    // the header carries it (the export decides whether a file keeps it).
+    buf[offsets::GAUGE_LENGTH_M..offsets::GAUGE_LENGTH_M + 4]
+        .copy_from_slice(&step(header.gauge_length_m).to_le_bytes());
 
     Ok(PyBytes::new(py, &buf))
 }

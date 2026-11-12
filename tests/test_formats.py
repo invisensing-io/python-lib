@@ -287,9 +287,12 @@ V1_TEXTUAL_HEADER_LINES = [
     "C22 TRIGGER DELAY: 120 METRES",
     "C23 TIMESTAMP NS: 1790000000123456789",
     "C24 CARD: p21",
-    "C25 NOTE - SAMPLE INTERVAL (DT) IS 0 HERE. THIS IS NOT A CORRUPT FILE.",
-    "C26 - NO WHOLE-MICROSECOND PERIOD EXISTS AT THIS SAMPLE RATE (REV1 U16).",
-    "C27 - TIME AXIS: ONE TRACE PER TRIGGER LINE, SEE C15 ABOVE.",
+    # A phase with a known gauge (Audace-Lib a5fccd5): 6 positions of 1.6 m.
+    # The NOTE lines follow it.
+    "C25 GAUGE LENGTH: 9.6 METRES",
+    "C26 NOTE - SAMPLE INTERVAL (DT) IS 0 HERE. THIS IS NOT A CORRUPT FILE.",
+    "C27 - NO WHOLE-MICROSECOND PERIOD EXISTS AT THIS SAMPLE RATE (REV1 U16).",
+    "C28 - TIME AXIS: ONE TRACE PER TRIGGER LINE, SEE C15 ABOVE.",
 ]
 
 #: The textual header of a file written by the Filewriter before data format
@@ -361,6 +364,7 @@ def test_the_v1_textual_header_is_parsed(tmp_path, encoding):
         assert h.acquisition_ns == 1_790_000_000_123_456_789
         assert f.timestamp == "2026-11-03 10:00:00.123+01:00"
         assert f.card == "p21"
+        assert f.gauge_length_m == h.gauge_length_m == 9.6
         # The content type types the samples: f32 phase with no FLOAT flag.
         assert f.mode is Mode.PHASE and f.dtype == np.float32
         np.testing.assert_array_equal(f.get_phase(n=3), data)
