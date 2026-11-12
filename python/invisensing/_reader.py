@@ -16,6 +16,10 @@ Usage::
         else:
             samples = f.read_lines(1000)
 
+    # The same phase as strain, in nm/m (the file must record its gauge):
+    with File("phase/2026-11-03_10-00-00.h5", phase_unit="nanostrain") as f:
+        strain = f.get_phase()             # float32, nm/m
+
 The ``with`` block is not decoration: leaving it closes the underlying
 file descriptor there and then. Without it, call ``f.close()``. A closed
 file still describes itself (header, mode, shape, dtype…); only reading
@@ -53,8 +57,11 @@ from ._core import (
     FLAG_UNSIGNED,
     FORMAT_VERSION,
     HEADER_SIZE,
+    NANOSTRAIN_PER_RAD_METRE,
     TIME_FLAG_MAP_V1,
     TIME_FLAG_CORRECTED,
+    nanostrain_factor,
+    phase_to_nanostrain,
 )
 
 __all__ = [
@@ -76,9 +83,18 @@ __all__ = [
     "FLAG_UNSIGNED",
     "FORMAT_VERSION",
     "HEADER_SIZE",
+    "NANOSTRAIN_PER_RAD_METRE",
     "TIME_FLAG_MAP_V1",
     "TIME_FLAG_CORRECTED",
 ]
+
+
+#: The values of ``File(phase_unit=…)``: the phase as stored (radians), or
+#: converted to strain while it is read.
+_PHASE_UNITS = ("rad", "nanostrain")
+#: The unit strain is read in (``File.unit`` of a file opened with
+#: ``phase_unit="nanostrain"``): nanometres per metre.
+STRAIN_UNIT = "nm/m"
 
 
 _I64_MIN = -(2**63)
@@ -146,7 +162,8 @@ class Mode(Enum):
     ARCTAN_MAGNITUDE = "arctan_magnitude"
     #: One phase per position, ``float32`` radians — on-board or software
     #: demodulation (:attr:`File.content_type_name` names the chain). Use
-    #: :meth:`File.get_phase` (or :meth:`File.read_lines`).
+    #: :meth:`File.get_phase` (or :meth:`File.read_lines`). Read as strain
+    #: in nm/m when the file is opened with ``phase_unit="nanostrain"``.
     PHASE = "phase"
     #: Phase/amplitude pairs ``[phase, amplitude, …]``, ``float32`` (a
     #: demodulation that kept the amplitude, in a file written before data
@@ -318,6 +335,26 @@ class File:
     format
         Optional override (``"dat"``, ``"hdf5"``, ``"tdms"``, ``"segy"``).
         Use when the file has no recognised suffix.
+    phase_unit
+        ``"rad"`` (the default): every sample is read as stored — a phase in
+        radians. ``"nanostrain"``: the phase is read as **strain in nm/m**,
+        converted while it is read::
+
+            strain_nm_per_m = phase_rad / gauge_length_m * NANOSTRAIN_PER_RAD_METRE
+
+        with the gauge length the file records (:attr:`gauge_length_m`) and
+        ``NANOSTRAIN_PER_RAD_METRE`` (115, **provisional**: the final value
+        is fixed before the release that publishes the option). The factor
+        ``NANOSTRAIN_PER_RAD_METRE / gauge_length_m`` is computed once
+        (:attr:`nanostrain_per_rad`) and every phase sample takes one
+        multiply by it, in the native core: the dtype stays ``float32``.
+        Everything that returns samples honours it (:meth:`read_lines`,
+        :meth:`read_all`, iteration, :meth:`get_phase`, :meth:`channels`,
+        the legacy ``get_lines``); on a file of phase/amplitude pairs only
+        the phase lanes are converted, the amplitude is left as stored.
+        :attr:`unit` then says ``"nm/m"`` and :attr:`quantity` ``"strain"``;
+        :attr:`mode` stays :attr:`Mode.PHASE`. :meth:`export_dat` still
+        writes the file's own samples (radians).
 
     Raises
     ------
@@ -326,7 +363,10 @@ class File:
     ValueError
         If the format can't be auto-detected (and no override was given)
         or if the file isn't a valid Audace acquisition (zero
-        ``line_size`` / ``sample_size``).
+        ``line_size`` / ``sample_size``). With ``phase_unit="nanostrain"``:
+        if the file does not hold a phase (raw samples, I/Q, arctan,
+        amplitude, variances…), or holds one without recording its gauge
+        length (no gauge is ever assumed).
     ImportError
         If the chosen backend needs an optional third-party library
         (``h5py`` / ``npTDMS`` / ``segyio``) that isn't installed. The
@@ -348,6 +388,9 @@ class File:
     _quantization_max_error_rad: Optional[float] = None
     _source_content_type: Optional[int] = None
     _trailing_bytes: int = 0
+    # `phase_unit="nanostrain"`: the gauge length the phase is divided by
+    # (set at open); `None` reads the samples as stored.
+    _strain_gauge: Optional[float] = None
 
     # Suffix → backend class name (looked up in ``_formats``). Adding a
     # new format means adding an entry here and a class in ``_formats``.
@@ -360,7 +403,17 @@ class File:
         ".segy": "_SegyBackend",
     }
 
-    def __init__(self, path: Union[str, Path], *, format: Optional[str] = None):
+    def __init__(
+        self,
+        path: Union[str, Path],
+        *,
+        format: Optional[str] = None,
+        phase_unit: str = "rad",
+    ):
+        if not isinstance(phase_unit, str) or phase_unit not in _PHASE_UNITS:
+            raise ValueError(
+                f"phase_unit must be 'rad' (the default) or 'nanostrain', got {phase_unit!r}"
+            )
         path = Path(path)
         if not path.exists():
             raise FileNotFoundError(f"no such file: '{path}'")
@@ -410,6 +463,13 @@ class File:
         )
         self._source_content_type = getattr(self._backend, "source_content_type", None)
         self._trailing_bytes = int(getattr(self._backend, "trailing_bytes", 0) or 0)
+        if phase_unit == "nanostrain":
+            try:
+                self._strain_gauge = self._nanostrain_gauge()
+            except BaseException:
+                # Refused: release the descriptor before saying why.
+                self.close()
+                raise
         _warn_about_the_header(path, self._header)
         if self._trailing_bytes:
             warnings.warn(
@@ -533,8 +593,14 @@ class File:
         reported by the backend instead of by the facade.
         """
         backend = self._require_open()
+        gauge = self._strain_gauge
+        if gauge is None:
+            while backend.lines_left > 0:
+                yield backend.read_lines(1)[0]
+            return
+        pairs = bool(self._header.is_interleaved)
         while backend.lines_left > 0:
-            yield backend.read_lines(1)[0]
+            yield _phase_to_nanostrain(backend.read_lines(1), gauge, pairs)[0]
 
     # ── Metadata (properties) ──────────────────────────────────────────
 
@@ -903,8 +969,9 @@ class File:
         content type does not say and :attr:`mode` comes from the flags
         (``Header.mode_from_flags``): content type 0, a value this SDK does
         not know, a file written before data format v1 whose content type
-        does not describe it."""
-        return _join_members(self._header, "quantity")
+        does not describe it. A phase read with ``phase_unit="nanostrain"``
+        is ``"strain"`` (``"strain+amplitude"`` for pairs)."""
+        return _join_members(self._header, "quantity", strain=self._strain_gauge is not None)
 
     @property
     def unit(self) -> Optional[str]:
@@ -913,8 +980,16 @@ class File:
         ``"front_end_count"``, ``"source_unit_squared"``,
         ``"dimensionless"``, ``"script"`` — or ``"rad+count"`` for a file of
         pairs; ``None`` when the content type does not say (see
-        :attr:`quantity`)."""
-        return _join_members(self._header, "unit")
+        :attr:`quantity`). A phase read with ``phase_unit="nanostrain"`` is
+        in ``"nm/m"`` (``"nm/m+count"`` for pairs)."""
+        return _join_members(self._header, "unit", strain=self._strain_gauge is not None)
+
+    @property
+    def phase_unit(self) -> str:
+        """How the phase is read: ``"rad"`` (as stored, the default) or
+        ``"nanostrain"`` (strain in nm/m) — the ``phase_unit`` the file was
+        opened with."""
+        return "rad" if self._strain_gauge is None else "nanostrain"
 
     @property
     def gauge_length_m(self) -> Optional[float]:
@@ -933,6 +1008,23 @@ class File:
         whose mode comes from its flags (``Header.mode_from_flags``). The
         value as stored is ``header.gauge_length_m``."""
         return _gauge_of(self._header)
+
+    @property
+    def nanostrain_per_rad(self) -> Optional[float]:
+        """The factor a phase sample of this file is multiplied by to read in
+        nm/m: ``NANOSTRAIN_PER_RAD_METRE / gauge_length_m``, computed once in
+        float64 and rounded once to float32 (the factor of the ``float32``
+        samples), whatever ``phase_unit`` the file was opened with — or
+        ``None`` without a gauge length. ``quantization_step_rad`` and
+        ``quantization_max_error_rad`` stay in radians: times this factor,
+        they are in nm/m."""
+        g = _gauge_of(self._header)
+        if g is None:
+            return None
+        try:
+            return nanostrain_factor(g)
+        except ValueError:
+            return None
 
     @property
     def source_content_type(self) -> Optional[int]:
@@ -1137,14 +1229,19 @@ class File:
         """
         Read up to ``n`` consecutive pulses (rows). Returns a
         ``(rows, line_size)`` typed numpy array — dtype is
-        :attr:`dtype`.
+        :attr:`dtype`. With ``phase_unit="nanostrain"`` the phase samples
+        come in nm/m (converted in place on the buffer just read).
 
         Short-reads are tolerated: when fewer than ``n`` pulses remain,
         returns what's left. Raises :class:`OSError` only when the
         reader is already exhausted; raises :class:`ValueError` if
         ``n <= 0``.
         """
-        return self._require_open().read_lines(n)
+        block = self._require_open().read_lines(n)
+        gauge = self._strain_gauge
+        if gauge is None:
+            return block
+        return _phase_to_nanostrain(block, gauge, bool(self._header.is_interleaved))
 
     def read_all(self) -> np.ndarray:
         """
@@ -1190,7 +1287,9 @@ class File:
         :func:`export_dat`). The first line's time is :meth:`line_time_ns`
         of ``start`` — the corrected time on a file stamped from the card's
         time map. The data is copied ``chunk_lines`` lines at a time; the
-        read cursor is put back where it was.
+        read cursor is put back where it was. The samples are the file's
+        own, as stored: a file opened with ``phase_unit="nanostrain"``
+        still exports its phase in radians.
         """
         start = operator.index(start)
         if not 0 <= start <= self._num_lines:
@@ -1313,10 +1412,14 @@ class File:
         (:attr:`Mode.PHASE` — the card's phase or a software
         demodulation's, :attr:`content_type_name` says which) or the phase
         member of phase/amplitude pairs (:attr:`Mode.PHASE_AMPLITUDE`).
-        Returns ``(rows, positions_per_line)`` ``float32``.
+        Returns ``(rows, positions_per_line)`` ``float32``. On a file opened
+        with ``phase_unit="nanostrain"``: strain, in nm/m.
 
         On a phase file passing ``data`` returns it unchanged; passing
-        nothing reads ``n`` new pulses.
+        nothing reads ``n`` new pulses. ``data`` is taken as
+        :meth:`read_lines` of this file returned it (already in nm/m on a
+        file opened with ``phase_unit="nanostrain"``): it is never
+        converted again.
         """
         if self._require_mode("get_phase", Mode.PHASE, Mode.PHASE_AMPLITUDE) is Mode.PHASE:
             return self._column(data, n)
@@ -1525,6 +1628,31 @@ class File:
             f"Inspect file.mode to dispatch — see the Mode enum docs."
         )
 
+    def _nanostrain_gauge(self) -> float:
+        """The gauge length ``phase_unit="nanostrain"`` divides by, or the
+        :class:`ValueError` that says why this file cannot be read so."""
+        mode = self.mode
+        if mode not in (Mode.PHASE, Mode.PHASE_AMPLITUDE):
+            raise ValueError(
+                f"{self._path}: phase_unit='nanostrain' converts a phase to strain (nm/m), "
+                f"and this file holds {self.content_type_name!r} (content type "
+                f"{self.content_type}, mode {mode.value!r}), not a phase. Open it with "
+                "phase_unit='rad' (the default)."
+            )
+        gauge = self.gauge_length_m
+        if gauge is None:
+            raise ValueError(
+                f"{self._path}: phase_unit='nanostrain' needs the gauge length the phase "
+                f"was measured over, and this file ({self.content_type_name!r}, content "
+                f"type {self.content_type}) does not record its gauge length "
+                "(gauge_length_m is absent: a recording made before 2026-11, a MOZART or "
+                "MOZART_PLUS phase whose gauge is set by the optics, or a file converted "
+                "without it). No gauge length is assumed: read it in radians "
+                "(phase_unit='rad')."
+            )
+        nanostrain_factor(gauge)  # a gauge that gives no finite factor raises here
+        return gauge
+
     # ── Introspection ──────────────────────────────────────────────────
 
     def __repr__(self) -> str:
@@ -1535,6 +1663,8 @@ class File:
             # Construction failed before the header was read.
             return f"File({path!r}, unopened)"
         state = ", closed" if self.closed else ""
+        if self._strain_gauge is not None:
+            state = f", phase_unit='nanostrain'{state}"
         real = (
             ""
             if self.trig_frequency_is_exact
@@ -1585,19 +1715,28 @@ def _warn_about_the_header(path: Path, h: Header) -> None:
         )
 
 
-def _join_members(h: Header, field: str) -> Optional[str]:
+#: The quantity and unit a phase reads as with ``phase_unit="nanostrain"``.
+_STRAIN_COLUMNS = {"quantity": "strain", "unit": STRAIN_UNIT}
+
+
+def _join_members(h: Header, field: str, *, strain: bool = False) -> Optional[str]:
     """A registry column (``quantity`` / ``unit``) of a header's content
     type: the value, or ``m0+m1`` for a pair; ``None`` when the content type
     does not say what the samples are and the mode comes from the flags
     (``Header.mode_from_flags``: 0, unknown, contradicted, a pre-v1
-    ``sw_custom`` file, a pre-v1 unpaired file of a stream-only value)."""
+    ``sw_custom`` file, a pre-v1 unpaired file of a stream-only value).
+    ``strain``: a phase (column or member) reads as strain in nm/m."""
     ct = h.normalized_content_type
     info = _content.info(ct)
     if h.mode_from_flags:
         return None
+
+    def column(quantity: str, value: str) -> str:
+        return _STRAIN_COLUMNS[field] if strain and quantity == "phase" else value
+
     if info.members is not None:
-        return "+".join(getattr(m, field) for m in info.members)
-    return getattr(info, field)
+        return "+".join(column(m.quantity, getattr(m, field)) for m in info.members)
+    return column(info.quantity, getattr(info, field))
 
 
 def _gauge_of(h: Header) -> Optional[float]:
@@ -1609,6 +1748,25 @@ def _gauge_of(h: Header) -> Optional[float]:
     if not (math.isfinite(g) and g > 0.0) or h.mode_from_flags or not h.is_phase:
         return None
     return g
+
+
+def _phase_to_nanostrain(block: np.ndarray, gauge: float, pairs: bool) -> np.ndarray:
+    """``block`` as read, its phase converted to nm/m in the native core: in
+    place on the buffer the backend just allocated (a copy only when it is
+    not a C-contiguous, writeable, native-endian array), every sample or,
+    for ``pairs``, the phase lanes. Phase samples are floats in radians; an
+    integer array under a phase content type is no phase in radians and is
+    refused."""
+    dt = block.dtype
+    if dt.kind != "f" or dt.itemsize not in (4, 8):
+        raise ValueError(
+            f"phase samples stored as {dt} are not radians: they cannot be read in "
+            f"{STRAIN_UNIT} (phase_unit='nanostrain')"
+        )
+    if not (block.flags.c_contiguous and block.flags.writeable and dt.isnative):
+        block = np.array(block, dtype=dt.newbyteorder("="), order="C")
+    phase_to_nanostrain(block, gauge, interleaved=pairs)
+    return block
 
 
 def _amplitude_unit(h: Header) -> Optional[str]:

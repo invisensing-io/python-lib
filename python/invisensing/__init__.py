@@ -32,6 +32,15 @@ The recommended modern usage::
         elif f.mode is Mode.RAW:
             data = f.read_lines(1000)
 
+A phase can be read as strain, in nm/m, when the file records the gauge
+length it was measured over (``File.gauge_length_m``)::
+
+    with File("phase/2026-11-03_10-00-00.h5", phase_unit="nanostrain") as f:
+        strain = f.get_phase()   # phase_rad / gauge_length_m * NANOSTRAIN_PER_RAD_METRE
+
+``NANOSTRAIN_PER_RAD_METRE`` (115) is provisional: its final value is fixed
+before the release that publishes the option.
+
 The legacy SDK is preserved verbatim::
 
     import invisensing.File as iFile
@@ -77,6 +86,7 @@ from ._reader import (
     FLAG_UNSIGNED,
     FORMAT_VERSION,
     HEADER_SIZE,
+    NANOSTRAIN_PER_RAD_METRE,
     TIME_FLAG_MAP_V1,
     TIME_FLAG_CORRECTED,
 )
@@ -107,6 +117,7 @@ __all__ = [
     "FLAG_UNSIGNED",
     "FORMAT_VERSION",
     "HEADER_SIZE",
+    "NANOSTRAIN_PER_RAD_METRE",
     "TIME_FLAG_MAP_V1",
     "TIME_FLAG_CORRECTED",
     "content",
