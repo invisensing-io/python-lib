@@ -9,7 +9,8 @@ TDMS, a raw capture, an inexact trigger cadence, zone-variance archive
 exports (27, 28), and legacy files (content type 0; a pre-v1 file carrying
 an interleaved value). ``expected.json`` says what the writer put in each
 (header fields, the SHA-256 of the samples); ``generate.rs`` is the
-generator. A v1 file carries no FLOAT / UNSIGNED / INTERLEAVED flag: this
+generator. The phase files carry the gauge length their producer applied
+(9.6 m), every other file none. A v1 file carries no FLOAT / UNSIGNED / INTERLEAVED flag: this
 SDK must type and classify it from the content type alone, and keep every
 field through an export (E1).
 """
@@ -23,7 +24,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from invisensing import File, Mode, export_dat, content
+from invisensing import NANOSTRAIN_PER_RAD_METRE, File, Mode, export_dat, content
 
 ASSETS = Path(__file__).resolve().parent / "assets" / "v1"
 EXPECTED = ASSETS / "expected.json"
@@ -69,6 +70,10 @@ def _check_header(f: File, e: dict, *, exported: bool = False) -> None:
     assert h.sample_rate == e["sample_rate"]
     assert h.trig_frequency == e["trig_frequency"]
     assert f.trigger_delay == e["trigger_delay"]
+    # The gauge: the f64 the writer stores (a DAT's f32 read back as it).
+    assert h.gauge_length_m == e["gauge_length_m"]
+    assert np.float32(h.gauge_length_m) == np.float32(e["gauge_length_m_f32"])
+    assert f.gauge_length_m == (e["gauge_length_m"] or None)
     if e["format"] in ("dat", "h5", "tdms") or exported:
         assert h.acquisition_ns == e["acquisition_ns"]
     if e["format"] in ("dat", "h5") or (e["format"] == "tdms" and e["trig_frequency"] * e["trig_period_ticks"] == e["trig_clock_hz"]):
@@ -174,6 +179,27 @@ def test_an_export_keeps_the_whole_header(tmp_path, e):
             # The DAT gets the duration of its lines on the cadence.
             assert g.duration_s == (e["duration_s"] or None)
         np.testing.assert_array_equal(g.read_all(), source)
+
+
+@pytest.mark.parametrize("e", [e for e in _entries() if e["gauge_length_m"]], ids=_id)
+def test_a_phase_with_its_gauge_reads_as_strain(e):
+    """Every phase file of the writer, in every format: strain = phase ×
+    float32(K / gauge), bit for bit."""
+    path = ASSETS / e["path"]
+    with File(path) as f:
+        rad = f.read_all()
+    factor = np.float32(NANOSTRAIN_PER_RAD_METRE / e["gauge_length_m"])
+    with File(path, phase_unit="nanostrain") as f:
+        assert (f.quantity, f.unit) == ("strain", "nm/m")
+        strain = f.read_all()
+    assert strain.dtype == np.float32
+    np.testing.assert_array_equal(strain.view(np.uint32), (rad * factor).view(np.uint32))
+
+
+@pytest.mark.parametrize("e", [e for e in _entries() if not e["gauge_length_m"]], ids=_id)
+def test_a_file_without_a_gauge_is_not_read_as_strain(e):
+    with pytest.raises(ValueError, match="not a phase|does not record its gauge length"):
+        File(ASSETS / e["path"], phase_unit="nanostrain")
 
 
 def test_an_export_of_a_range_moves_the_anchor(tmp_path):

@@ -6,6 +6,12 @@
 //! `audace::formats`. Also legacy files (content type 0, and a pre-v1 file
 //! carrying an interleaved value) for the legacy reading path.
 //!
+//! The phase streams (22, and the 19 of the inexact cadence) carry the gauge
+//! length their producer applied (`set_gauge_positions`, 6 positions of
+//! 1.6 m: 9.6 m; Audace-Lib a5fccd5): their phase files keep it, the
+//! amplitude child of 22 drops it, and the files of every other stream have
+//! none. The pre-v1 files predate the field and carry none.
+//!
 //! Not part of the package: it builds against an Audace-Lib checkout, as
 //! `src/main.rs` of a crate whose `Cargo.toml` holds
 //!
@@ -110,6 +116,8 @@ impl Out {
             "temporal_step_s": hd::exact_temporal_step_s(h),
             "spatial_step_m_f32": h.spatial_step_m,
             "temporal_step_s_f32": h.temporal_step_s,
+            "gauge_length_m": hd::exact_gauge_length_m(h),
+            "gauge_length_m_f32": h.gauge_length_m,
             "card": hd::card_code(h).map(|c| c.as_code()),
             "acquisition_ns": hd::acquisition_ns(h),
             "trig_clock_hz": h.trig_clock_hz,
@@ -137,7 +145,9 @@ fn main() {
 
     // ── DUI_COHERENT with amplitude kept (22): phase/ (19) + amplitude/ (16) ──
     let flags22 = hf::DEMODULATED | hf::FLOAT | hf::PHASE | hf::INTERLEAVED;
-    let s22 = stream_header(ContentType::InterleavedDuiCoherentPhaseAmplitude, 2 * positions as i32, 4, flags22);
+    let mut s22 = stream_header(ContentType::InterleavedDuiCoherentPhaseAmplitude, 2 * positions as i32, 4, flags22);
+    // The gauge the producer applied: 6 positions of 1.6 m.
+    hd::set_gauge_positions(&mut s22, 6);
     let pairs22 = f32_bytes((0..lines * positions).flat_map(|k| {
         let phase = (k as f32) * 0.001 - 0.75;
         let amp = 1000.0 + (k % 97) as f32 * 0.5;
@@ -212,6 +222,7 @@ fn main() {
     hd::set_trig_timing(&mut s19, TriggerTiming::from_u64(250_000_000, 3333));
     s19.temporal_step_s = 0.0;
     hd::stamp_v1(&mut s19);
+    hd::set_gauge_positions(&mut s19, 6);
     let h19 = hd::to_file_header(&s19).unwrap();
     let data19 = f32_bytes((0..120 * positions).map(|k| (k as f32).sin()));
     out.write("inexact/2026-11-03_10-00-00.h5", FileFormat::HDF5, &h19, &data19, json!({"mode": "phase"}));
@@ -279,6 +290,7 @@ fn main() {
     v0.format_version = 0;
     v0.spatial_step_m = 0.0;
     v0.temporal_step_s = 0.0;
+    v0.gauge_length_m = 0.0; // before the field existed
     hd::set_card_tag(&mut v0, ""); // a single-card run before v1: no tag
     out.write("legacy/v0_ct8_phase_amplitude.dat", FileFormat::DAT, &v0, &pairs22, json!({"mode": "phase_amplitude"}));
     // …and a v0 dual-card file carrying the legacy variant tag of the p18 card
@@ -299,6 +311,7 @@ fn main() {
     v0dual.format_version = 0;
     v0dual.spatial_step_m = 0.0;
     v0dual.temporal_step_s = 0.0;
+    v0dual.gauge_length_m = 0.0;
     hd::set_card_tag(&mut v0dual, &legacy_p18);
     out.write("legacy/v0_ct4_dual_card.dat", FileFormat::DAT, &v0dual, &member(&pairs22, 4, 0), json!({"mode": "phase"}));
 
