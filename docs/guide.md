@@ -337,6 +337,78 @@ with File("arctan_mag.dat") as f:
     # {"arctan": int16, "magnitude": uint16}
 ```
 
+### Phase as strain, in nm/m (since 1.6.0)
+
+A differential phase measured over a gauge of `g` metres of fibre is a
+strain. `File(path, phase_unit="nanostrain")` reads every phase sample as
+strain, in **nm/m**, while it is read:
+
+```text
+strain [nm/m] = phase [rad] / gauge_length_m [m] × NANOSTRAIN_PER_RAD_METRE
+```
+
+```python
+from invisensing import File
+
+with File("phase/2026-11-12_10-00-00.h5", phase_unit="nanostrain") as f:
+    f.gauge_length_m          # 9.6 — the gauge the producer applied
+    f.nanostrain_per_rad      # float32(115 / 9.6) — the factor applied
+    f.unit, f.quantity        # "nm/m", "strain"  (f.mode stays Mode.PHASE)
+    strain = f.get_phase()    # float32, nm/m
+```
+
+!!! warning "`NANOSTRAIN_PER_RAD_METRE` is provisional"
+    The constant (115 nm/m per rad/m, `invisensing.NANOSTRAIN_PER_RAD_METRE`)
+    is an approximation. Its final value is fixed before the release that
+    publishes this option on PyPI. It is a constant of the SDK, not a
+    parameter.
+
+**The gauge length** is the one the producer *applied* — the distance
+between the two ends of the differential gauge, a whole number of the
+stream's positions — never the length the configuration asked for. It is
+recorded since 2026-11, on a phase only: DAT header bytes 120..124
+(float32), HDF5 root attribute and TDMS property `gauge_length_m`
+(float64), SEG-Y textual line `GAUGE LENGTH: <m> METRES`. A DAT's float32
+is read back as the float64 the other formats store, so the DAT and the
+HDF5 of one recording give the same strain to the bit.
+`File.gauge_length_m` is `None` without one.
+
+**Refusals.** Opening with `phase_unit="nanostrain"` raises `ValueError`
+(the message names the content type) when:
+
+- the file holds no phase — raw samples, I/Q, the card's arctan,
+  amplitudes, a script's output, zone variances;
+- the phase does not record its gauge length — every file recorded before
+  2026-11, a MOZART / MOZART_PLUS phase (its gauge is set by the optics,
+  not by software), a file read from its flags (content type 0). No gauge
+  length is ever assumed: read such a file in radians.
+
+**What is converted.** Every read path: `read_lines`, `read_all`,
+iteration, `get_phase`, `channels`, the legacy `get_lines`. A buffer you
+pass back to an extractor (`f.get_phase(block)`) is taken as read — it is
+never converted twice. On a file of phase/amplitude pairs (written before
+data format v1) only the phase lanes are converted; `get_amplitude()` is
+the amplitude as stored, and `f.unit` reads `"nm/m+count"`.
+`quantization_step_rad` and `quantization_max_error_rad` of a
+`ZSTD_LOSSY_1E4` file stay in radians (times `nanostrain_per_rad` they are
+in nm/m). `export_dat()` writes the file's own samples, in radians.
+
+**Precision.** The factor `NANOSTRAIN_PER_RAD_METRE / gauge_length_m` is
+computed once in float64 and rounded once to float32; each phase sample
+then takes one float32 multiply by it (round to nearest even), so the
+result is exactly `phase * np.float32(115 / g)` and the dtype stays
+`float32`. A float64 phase (a third-party HDF5) is converted in float64
+with the float64 factor.
+
+**Speed.** The multiply runs in place on the buffer just read, in the Rust
+core, with AVX-512F or AVX2 kernels chosen at run time — each one
+bit-identical to the scalar loop — and the GIL released on large reads.
+`invisensing._core.simd_level()` names the kernel in use;
+`INVISENSING_SIMD=scalar|avx2|avx512` caps it for a process. It is
+memory-bound: about the speed of numpy's in-place `np.multiply(a, f,
+out=a)`, four times faster than `a / g * K`, which allocates two
+temporaries.
+
 ---
 
 ## Streaming large files
@@ -399,7 +471,7 @@ dataset named `acoustic_data`, typed by the content type (`int16`,
 `uint16`, `float32`; on older files by `bytes_per_sample` and the `FLOAT`
 attribute). Every header field is mirrored as a scalar attribute — with
 data format v1 also `format_version`, `card`, `duration_s` and the steps
-in f64. Lines are read slice by slice: a multi-GB capture never has to fit
+in f64, and since 2026-11 `gauge_length_m` on a phase with a known gauge. Lines are read slice by slice: a multi-GB capture never has to fit
 in RAM.
 
 Recordings written with the FileWriter's `compression = ZSTD` store the
@@ -485,6 +557,9 @@ fired at an inexact rate is refused: a DAT never carries one.
   libraries; the de-interleave step always runs through the same
   Rust kernels, so channel-extraction perf doesn't depend on the
   source format.
+- The phase to strain conversion (`phase_unit="nanostrain"`) is one
+  in-place multiply per sample with AVX-512F / AVX2 kernels chosen at run
+  time, bit-identical to the scalar loop (see above).
 
 ### Safety
 
@@ -493,7 +568,10 @@ fired at an inexact rate is refused: a DAT never carries one.
   Downstream maths can assume positive sizes everywhere.
 - **Bounded `unsafe`**: three small blocks in the Rust extension,
   each one documented and exercised by 1-million-sample
-  correctness tests.
+  correctness tests — plus the SIMD strain kernels (calls of
+  `#[target_feature]` functions once the CPU is known to run the
+  feature, unaligned loads and stores within one-vector chunks), checked
+  bit for bit against the scalar loop.
 - **No `mmap`**: deliberate. Memory-mapped files turn I/O errors
   into SIGBUS (segfault) instead of Python exceptions, which is
   unacceptable in a long-running lab process.

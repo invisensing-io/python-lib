@@ -73,6 +73,9 @@ with File("acquisition.h5") as f:
 ```
 
 (`if` / `elif` rather than `match`: the SDK supports Python 3.9.)
+A phase that records its gauge length reads as strain, in nm/m, with
+`File(path, phase_unit="nanostrain")` (since 1.6.0; see the
+[Guide](guide.md#phase-as-strain-in-nmm-since-160)).
 `get_magnitude_volts()` converts the card's magnitude only (unit
 `"count"`); a software front end's amplitude (`sw_amplitude_sac`, unit
 `"front_end_count"`) is on another scale and is refused.

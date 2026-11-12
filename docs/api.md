@@ -115,6 +115,24 @@ the others describe the files written before it.
 | `HEADER_SIZE` | `128` | Size of the wire header in bytes |
 | `FORMAT_VERSION` | `1` | The data format version this SDK reads in full (`File.format_version`) |
 
+## Strain constant
+
+`File(path, phase_unit="nanostrain")` reads a phase as strain, in nm/m:
+`phase_rad / gauge_length_m * NANOSTRAIN_PER_RAD_METRE` (see the
+[Guide](guide.md#phase-as-strain-in-nmm-since-160)).
+
+| Constant | Value | Meaning |
+|---|---|---|
+| `NANOSTRAIN_PER_RAD_METRE` | `115.0` | nm/m of strain per rad/m of phase over the gauge. **Provisional**: the final value is fixed before the release that publishes the option |
+
+The native core underneath (`invisensing._core`, not part of the stable
+API): `nanostrain_factor(gauge_length_m)` (the float32 factor),
+`phase_to_nanostrain(array, gauge_length_m, *, interleaved=False,
+simd=None)` (in place on a C-contiguous float32 / float64 array; returns
+the kernel used), `simd_level()` (the kernel in use: `"avx512"`, `"avx2"`
+or `"scalar"`, capped by `INVISENSING_SIMD`) and `simd_levels()` (every
+kernel this CPU runs).
+
 ## Time-flag constants
 
 Bits of the header's `time_flags` (bytes 100..104, `Header.time_flags`).

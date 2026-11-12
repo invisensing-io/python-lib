@@ -446,6 +446,51 @@ in their header (all formats; `0` / absent on older files):
 The header bit `0x020`, never set by any producer, is now
 `FLAG_RESERVED`.
 
+## Phase as strain, in nm/m (since 1.6.0)
+
+A differential phase measured over a gauge of `g` metres of fibre is a
+strain. Open a phase file with `phase_unit="nanostrain"` and every phase
+sample is read as strain, in **nm/m**:
+
+```python
+from invisensing import File, NANOSTRAIN_PER_RAD_METRE
+
+with File("phase/2026-11-12_10-00-00.h5", phase_unit="nanostrain") as f:
+    f.gauge_length_m        # 9.6: the gauge the producer applied, metres
+    f.unit, f.quantity      # "nm/m", "strain"
+    strain = f.get_phase()  # float32, nm/m
+    for line in f: ...      # every read path converts
+```
+
+```text
+strain [nm/m] = phase [rad] / gauge_length_m [m] × NANOSTRAIN_PER_RAD_METRE
+```
+
+- **`NANOSTRAIN_PER_RAD_METRE` = 115 is provisional.** Its final value is
+  fixed before the release that publishes this option on PyPI; it is a
+  constant of the SDK, not a parameter.
+- **The gauge length comes from the file**: the one the producer applied
+  (a whole number of positions), recorded since 2026-11 on a phase only —
+  DAT header bytes 120..124, HDF5 attribute and TDMS property
+  `gauge_length_m`, SEG-Y line `GAUGE LENGTH`. `File.gauge_length_m` gives
+  it (`None` without one); `File.nanostrain_per_rad` the factor.
+- **Refusals** (`ValueError` at open, naming the content type): a file that
+  holds no phase (raw, I/Q, arctan, amplitude, script output, variances),
+  and a phase that does not record its gauge length (recorded before
+  2026-11, a MOZART / MOZART_PLUS phase — its gauge is set by the optics —,
+  a file read from its flags). No gauge length is ever assumed.
+- The factor `NANOSTRAIN_PER_RAD_METRE / gauge_length_m` is computed once
+  in float64 and rounded once to float32; every phase sample then takes one
+  float32 multiply by it, in place on the buffer just read, in the native
+  core (AVX-512 or AVX2 when the CPU has them, bit-identical to the scalar
+  path). The dtype stays `float32`.
+- On a file of phase/amplitude pairs (written before data format v1) only
+  the phases are converted; the amplitude is left as stored.
+- `quantization_step_rad` / `quantization_max_error_rad` (`ZSTD_LOSSY_1E4`)
+  stay in radians: times `nanostrain_per_rad`, they are in nm/m.
+- `export_dat` still writes the file's own samples, in radians.
+- `phase_unit="rad"`, the default, reads every file exactly as before.
+
 ## Writing files
 
 ```python
@@ -544,6 +589,13 @@ into a numpy array in Python.
 - **Zero allocation on the hot path** in the channel extractors: each
   call returns a single freshly-allocated numpy array; no intermediate
   scratch buffers, no per-row copies.
+- **Phase to strain** (`phase_unit="nanostrain"`) multiplies in place, with
+  AVX-512F or AVX2 kernels picked at run time (`invisensing._core.
+  simd_level()`; `INVISENSING_SIMD=scalar|avx2|avx512` caps it), each
+  bit-identical to the scalar loop. The conversion is memory-bound: on an
+  AVX-512 server it runs at the speed of numpy's in-place multiply
+  (≈ 2.6·10⁹ samples/s, ≈ 21 GB/s read + write) and adds ≈ 7 % to a
+  `read_all()` of a DAT from the page cache.
 
 Measured on a recent laptop (single-threaded, release build):
 
@@ -571,7 +623,11 @@ kernels — so a future refactor can't silently re-introduce the
   primitive copy, and the i16→u16 bitcast for the magnitude lane).
   Each one has a one-line invariant in a `// SAFETY:` comment and is
   exercised by the 1-million-sample correctness tests in
-  `tests/test_performance.py`.
+  `tests/test_performance.py`. The strain kernels add the calls of their
+  `#[target_feature]` functions, made only once the CPU is known to run
+  the feature, and unaligned vector loads and stores within chunks of
+  exactly one vector; every kernel is checked bit for bit against the
+  scalar loop (`src/strain.rs`, `tests/test_strain_kernels.py`).
 - **Clear Python exceptions** instead of crashes: every error path
   (missing file, malformed header, short read, wrong mode for the
   extractor) raises a typed `OSError` / `ValueError` / `FileNotFoundError`
