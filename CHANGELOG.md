@@ -4,6 +4,57 @@ Changes to the `invisensing` package, one section per version published on
 PyPI. Each section lists what a script written for the previous version may
 see differently, then what is new.
 
+## 1.6.0
+
+Reads the gauge length a producer applied to a phase (recorded since
+2026-11), and can read a phase as strain, in nm/m.
+
+### Changed — behaviour that differs from 1.5.0
+
+- **`Header` has a `gauge_length_m` field** (metres, float; `0.0` when
+  absent): `Header(...)` takes it as a keyword (default `0.0`),
+  `repr(header)` shows it when it is not 0, and `HEADER_LAYOUT` lists it
+  (bytes 120..124, float32). A DAT's float32 is read back as the float64
+  the other formats store (`k · 1e8 / sample_rate` for a whole `k`).
+- **DAT exports write header bytes 120..124**: `File.export_dat()` and
+  `export_dat(header=…)` keep the gauge length of a phase content type and
+  write 0 for every other (the amplitude of a split pair, a raw file with a
+  stray value, a legacy copy, pairs), as the acquisition's writers do.
+  1.5.0 always wrote 0 there. Files without a gauge export as before.
+- **SEG-Y**: the `C25 GAUGE LENGTH: <m> METRES` line Audace-Lib writes on a
+  phase is read; the NOTE lines that follow it are read as before.
+
+### Added
+
+- **`File.gauge_length_m`**: the gauge length the producer applied to the
+  phase, in metres — DAT header bytes 120..124, HDF5 attribute and TDMS
+  property `gauge_length_m`, SEG-Y line `GAUGE LENGTH` — or `None` (every
+  file recorded before 2026-11, a MOZART / MOZART_PLUS phase, a non-phase
+  file, a file read from its flags).
+- **`File(path, phase_unit="nanostrain")`**: the phase is read as strain,
+  in nm/m, `phase_rad / gauge_length_m * NANOSTRAIN_PER_RAD_METRE`, by every
+  read path (`read_lines`, `read_all`, iteration, `get_phase`, `channels`,
+  `get_lines`). The factor is computed once in float64 and rounded once to
+  float32; each phase sample takes one float32 multiply by it (the dtype
+  stays `float32`). On phase/amplitude pairs only the phases are
+  converted. `File.unit` is `"nm/m"`, `File.quantity` `"strain"`;
+  `File.mode` stays `Mode.PHASE`. `export_dat()` still writes radians.
+  `phase_unit="rad"` (the default) reads every file as before.
+- Refused at open with a `ValueError` naming the content type: a file that
+  holds no phase, and a phase that does not record its gauge length. No
+  gauge length is ever assumed.
+- **`NANOSTRAIN_PER_RAD_METRE`** = 115 nm/m per rad/m — **provisional**:
+  the final value is fixed before the release that publishes the option.
+- `File.phase_unit`, `File.nanostrain_per_rad` (the float32 factor of a
+  file with a gauge), `export_dat(gauge_length_m=…)` (a phase content type
+  only).
+- The conversion runs in the native core, in place, with AVX-512F or AVX2
+  kernels chosen at run time, each bit-identical to the scalar loop:
+  `invisensing._core.simd_level()` names the kernel in use,
+  `INVISENSING_SIMD=scalar|avx2|avx512` caps it.
+- `quantization_step_rad` and `quantization_max_error_rad` stay in
+  radians.
+
 ## 1.5.0
 
 Follows the producer's content-type registry to revision 4: the software
