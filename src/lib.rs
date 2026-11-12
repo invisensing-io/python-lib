@@ -22,6 +22,10 @@
 //!   [`split_pair_i16_secondary`], [`split_pair_unsigned`],
 //!   [`split_pair_to_complex_i16`], [`split_pair_f32_primary`],
 //!   [`split_pair_f32_secondary`].
+//! - The phase to strain conversion ([`strain`]): the provisional constant
+//!   `NANOSTRAIN_PER_RAD_METRE`, [`nanostrain_factor`] and the in-place
+//!   [`phase_to_nanostrain`], with AVX-512 / AVX2 kernels chosen at run time
+//!   ([`simd_level`]), bit-identical to the scalar loop.
 //!
 //! All hot kernels operate on contiguous-memory views (`as_slice`) and use
 //! `chunks_exact(2)` so LLVM can auto-vectorise the stride-2 reads. The
@@ -37,16 +41,21 @@
 //! restrict `T` to `u16`/`i16`/`u32`/`i32`/`u64`/`i64`/`f32`/`f64`. Every
 //! other buffer is built initialised (`vec![0; n]`, `collect()`).
 //!
+//! The SIMD kernels of [`strain`] are the other `unsafe` code: calls of
+//! `#[target_feature]` functions made only once the CPU is known to run the
+//! feature, and unaligned vector loads and stores within `chunks_exact_mut`
+//! chunks of exactly one vector.
+//!
 //! The 128-byte Audace wire-format header and the `header_flags`
 //! bit values are documented in the public Invisensing SDK reference;
 //! this crate ships its own copy of the layout so it stays standalone.
 
 use numpy::{
-    PyArray1, PyArray2,
+    PyArray1, PyArray2, PyArrayMethods, PyUntypedArrayMethods,
     ndarray::{Array2, ArrayView2},
 };
 use pyo3::{
-    exceptions::{PyIOError, PyMemoryError, PyValueError},
+    exceptions::{PyIOError, PyMemoryError, PyTypeError, PyValueError},
     prelude::*,
     types::{PyBytes, PyDict, PyList},
 };
@@ -57,6 +66,7 @@ use std::{
 };
 
 mod content;
+mod strain;
 
 use content::SampleType;
 
@@ -1709,6 +1719,121 @@ fn time_axis_ns<'py>(
     Ok(PyArray1::from_vec(py, out))
 }
 
+// ── Phase to strain (nm/m) ──────────────────────────────────────────────────
+
+/// The factor a phase sample of a file whose gauge is `gauge_length_m`
+/// metres is multiplied by to read in nm/m: `NANOSTRAIN_PER_RAD_METRE /
+/// gauge_length_m`, computed once in f64 and rounded once to float32 (the
+/// factor of float32 samples, returned as the Python float of that f32).
+/// Raises `ValueError` when the gauge is not a length (zero, negative, not
+/// finite) or gives no finite factor.
+#[pyfunction]
+fn nanostrain_factor(gauge_length_m: f64) -> PyResult<f64> {
+    strain::factor_f32(gauge_length_m)
+        .map(f64::from)
+        .ok_or_else(|| bad_gauge(gauge_length_m))
+}
+
+fn bad_gauge(gauge_length_m: f64) -> PyErr {
+    PyValueError::new_err(format!(
+        "gauge_length_m = {gauge_length_m} m is not a gauge length (it must be a finite \
+         length above zero that gives a finite factor)"
+    ))
+}
+
+/// Convert a phase array, in radians, to strain in nm/m **in place**:
+/// `x · NANOSTRAIN_PER_RAD_METRE / gauge_length_m`, as one multiply per
+/// sample by the factor computed once (f64, rounded once to f32 for a
+/// `float32` array — [`nanostrain_factor`]; kept f64 for a `float64` one).
+///
+/// - `array`: a C-contiguous, writeable, native-endian `float32` or
+///   `float64` numpy array of any shape. It is modified and not returned.
+/// - `interleaved=True`: the array holds `[phase, amplitude, …]` pairs; only
+///   the phases (the even indices of the flattened array, which the even
+///   last dimension makes lane 0 of every pair) are converted, the
+///   amplitudes keep their bits. The last dimension must be even.
+/// - `simd`: `"scalar"`, `"avx2"` or `"avx512"` forces a kernel (clamped to
+///   what the CPU runs) — for tests; default [`simd_level`]. Every kernel
+///   gives the same bits.
+///
+/// Returns the kernel used. The GIL is released for large arrays.
+#[pyfunction]
+#[pyo3(signature = (array, gauge_length_m, *, interleaved = false, simd = None))]
+fn phase_to_nanostrain(
+    py: Python<'_>,
+    array: &Bound<'_, PyAny>,
+    gauge_length_m: f64,
+    interleaved: bool,
+    simd: Option<&str>,
+) -> PyResult<&'static str> {
+    let tier = match simd {
+        None => strain::active_tier(),
+        Some(name) => strain::Tier::parse(name).ok_or_else(|| {
+            PyValueError::new_err(format!("simd must be 'scalar', 'avx2' or 'avx512', got {name:?}"))
+        })?,
+    };
+    let check = |shape: &[usize], contiguous: bool| -> PyResult<()> {
+        if !contiguous {
+            return Err(PyValueError::new_err("phase_to_nanostrain needs a C-contiguous array"));
+        }
+        if interleaved && shape.last().is_some_and(|&n| n % 2 != 0) {
+            return Err(PyValueError::new_err(format!(
+                "interleaved pairs need an even last dimension (got {shape:?})"
+            )));
+        }
+        Ok(())
+    };
+    if let Ok(a) = array.downcast::<numpy::PyArrayDyn<f32>>() {
+        let factor = strain::factor_f32(gauge_length_m).ok_or_else(|| bad_gauge(gauge_length_m))?;
+        let mut rw = a.try_readwrite().map_err(|e| PyValueError::new_err(format!("{e}")))?;
+        check(rw.shape(), rw.is_c_contiguous())?;
+        let data = rw.as_slice_mut().map_err(|e| PyValueError::new_err(format!("{e}")))?;
+        let used = if data.len() >= strain::GIL_RELEASE_MIN_SAMPLES {
+            py.allow_threads(|| strain::scale_f32(tier, data, factor, interleaved))
+        } else {
+            strain::scale_f32(tier, data, factor, interleaved)
+        };
+        return Ok(used.as_str());
+    }
+    if let Ok(a) = array.downcast::<numpy::PyArrayDyn<f64>>() {
+        let factor = strain::factor_f64(gauge_length_m).ok_or_else(|| bad_gauge(gauge_length_m))?;
+        let mut rw = a.try_readwrite().map_err(|e| PyValueError::new_err(format!("{e}")))?;
+        check(rw.shape(), rw.is_c_contiguous())?;
+        let data = rw.as_slice_mut().map_err(|e| PyValueError::new_err(format!("{e}")))?;
+        let used = if data.len() >= strain::GIL_RELEASE_MIN_SAMPLES {
+            py.allow_threads(|| strain::scale_f64(tier, data, factor, interleaved))
+        } else {
+            strain::scale_f64(tier, data, factor, interleaved)
+        };
+        return Ok(used.as_str());
+    }
+    Err(PyTypeError::new_err(format!(
+        "phase_to_nanostrain converts a native float32 or float64 numpy array, got {}",
+        array.getattr("dtype").map_or_else(|_| array.get_type().to_string(), |d| d.to_string())
+    )))
+}
+
+/// The kernel [`phase_to_nanostrain`] uses by default: `"avx512"`
+/// (AVX-512F), `"avx2"` or `"scalar"` — the widest this CPU runs, detected
+/// once, capped by the environment variable `INVISENSING_SIMD`
+/// (`scalar|avx2|avx512`, read once per process; a kernel the CPU lacks is
+/// clamped to the widest below it, an unknown value is ignored).
+#[pyfunction]
+fn simd_level() -> &'static str {
+    strain::active_tier().as_str()
+}
+
+/// Every kernel this CPU runs, plainest first (`["scalar", "avx2",
+/// "avx512"]` on an AVX-512 machine), whatever `INVISENSING_SIMD` says.
+#[pyfunction]
+fn simd_levels() -> Vec<&'static str> {
+    strain::Tier::ALL
+        .iter()
+        .filter(|&&t| t <= strain::cpu_tier())
+        .map(|t| t.as_str())
+        .collect()
+}
+
 // ── Module init ─────────────────────────────────────────────────────────────
 
 /// Module entry point — Python imports this as `invisensing._core`.
@@ -1725,6 +1850,13 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(split_pair_to_complex_i16, m)?)?;
     m.add_function(wrap_pyfunction!(split_pair_f32_primary, m)?)?;
     m.add_function(wrap_pyfunction!(split_pair_f32_secondary, m)?)?;
+    m.add_function(wrap_pyfunction!(nanostrain_factor, m)?)?;
+    m.add_function(wrap_pyfunction!(phase_to_nanostrain, m)?)?;
+    m.add_function(wrap_pyfunction!(simd_level, m)?)?;
+    m.add_function(wrap_pyfunction!(simd_levels, m)?)?;
+    // nm/m of strain per rad/m of phase over the gauge — PROVISIONAL, see
+    // `strain::NANOSTRAIN_PER_RAD_METRE`.
+    m.add("NANOSTRAIN_PER_RAD_METRE", strain::NANOSTRAIN_PER_RAD_METRE)?;
 
     // Expose the header-flag bits as module-level constants (i.e.
     // `invisensing._core.FLAG_INTERLEAVED`) so the Python wrapper and any
