@@ -152,7 +152,7 @@ def test_the_amplitude_lanes_keep_their_bits():
         before = a.copy()
         phase_to_nanostrain(a, 10.0, interleaved=True, simd=level)
         assert np.array_equal(_bits(a[:, 1::2]), _bits(before[:, 1::2])), level
-        assert np.all(a[:, 0::2] == np.float32(11.5))
+        assert np.all(a[:, 0::2] == np.float32(NANOSTRAIN_PER_RAD_METRE / 10.0))
 
 
 def test_what_the_kernel_refuses():
