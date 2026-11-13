@@ -20,6 +20,11 @@ Usage::
     with File("phase/2026-11-03_10-00-00.h5", phase_unit="nanostrain") as f:
         strain = f.get_phase()             # float32, nm/m
 
+    # ...or as strain rate, in nm/m/s: the strain increment from the
+    # previous line times the trigger frequency (line 0 is NaN):
+    with File("phase/2026-11-03_10-00-00.h5", phase_unit="strain_rate") as f:
+        rate = f.get_phase()               # float32, nm/m/s
+
 The ``with`` block is not decoration: leaving it closes the underlying
 file descriptor there and then. Without it, call ``f.close()``. A closed
 file still describes itself (header, mode, shape, dtype…); only reading
@@ -28,6 +33,7 @@ data from it raises.
 
 from __future__ import annotations
 
+import bisect
 import math
 import operator
 import warnings
@@ -62,6 +68,8 @@ from ._core import (
     TIME_FLAG_CORRECTED,
     nanostrain_factor,
     phase_to_nanostrain,
+    phase_to_strain_rate,
+    strain_rate_factor,
 )
 
 __all__ = [
@@ -90,11 +98,24 @@ __all__ = [
 
 
 #: The values of ``File(phase_unit=…)``: the phase as stored (radians), or
-#: converted to strain while it is read.
-_PHASE_UNITS = ("rad", "nanostrain")
+#: converted while it is read to strain or to strain rate.
+_PHASE_UNITS = ("rad", "nanostrain", "strain_rate")
 #: The unit strain is read in (``File.unit`` of a file opened with
 #: ``phase_unit="nanostrain"``): nanometres per metre.
 STRAIN_UNIT = "nm/m"
+#: The unit strain rate is read in (``File.unit`` of a file opened with
+#: ``phase_unit="strain_rate"``): nanometres per metre per second.
+STRAIN_RATE_UNIT = "nm/m/s"
+#: What a phase (a column, or the phase member of pairs) reads as, by
+#: ``phase_unit``: the registry's ``quantity`` and ``unit`` columns.
+_PHASE_READ_AS = {
+    "nanostrain": {"quantity": "strain", "unit": STRAIN_UNIT},
+    "strain_rate": {"quantity": "strain rate", "unit": STRAIN_RATE_UNIT},
+}
+#: A line that comes more than this many line periods after the previous
+#: one on the file's time axis follows a gap (lost shots): its strain rate is
+#: NaN (see :attr:`File.time_gaps`).
+_GAP_PERIODS = 1.5
 
 
 _I64_MIN = -(2**63)
@@ -356,6 +377,32 @@ class File:
         :attr:`mode` stays :attr:`Mode.PHASE`. :meth:`export_dat` still
         writes the file's own samples (radians).
 
+        ``"strain_rate"``: the phase is read as **strain rate in nm/m/s**,
+        the strain increment from the previous line times the line rate::
+
+            strain_rate[n] = (strain[n] - strain[n-1]) * trig_frequency_real_hz
+                           = (phase[n] - phase[n-1]) * NANOSTRAIN_PER_RAD_METRE
+                             / gauge_length_m * trig_frequency_real_hz
+
+        ``strain`` being the ``"nanostrain"`` reading and the line rate the
+        rate the card really fired at (:attr:`trig_frequency_real_hz`: the
+        requested :attr:`trig_frequency` on a file that does not carry the
+        exact clock). The factor is computed once
+        (:attr:`strain_rate_per_rad`); every phase sample takes one
+        subtraction of the previous line's stored phase, then one multiply
+        by it, in the native core (see :func:`_phase_to_strain_rate`, the one
+        place this definition lives). Every read path honours it, as above,
+        and carries the previous line across reads: reading the file in
+        blocks of any size gives the bits of :meth:`read_all`, and a read
+        after :meth:`seek_lines` to line ``k > 0`` reads line ``k − 1`` first.
+        Two lines have no increment at the line rate, and read **NaN** in
+        their phase lanes (the amplitude of pairs stays as stored): line 0
+        of the file (nothing precedes it: the previous file of a recording is
+        never opened), and every line that follows a gap of the file's time
+        axis (:attr:`time_gaps`: lost shots), whose increment spans more than
+        one line period and is never divided by one. :attr:`unit` then says
+        ``"nm/m/s"`` and :attr:`quantity` ``"strain rate"``.
+
     Raises
     ------
     FileNotFoundError
@@ -363,10 +410,11 @@ class File:
     ValueError
         If the format can't be auto-detected (and no override was given)
         or if the file isn't a valid Audace acquisition (zero
-        ``line_size`` / ``sample_size``). With ``phase_unit="nanostrain"``:
-        if the file does not hold a phase (raw samples, I/Q, arctan,
-        amplitude, variances…), or holds one without recording its gauge
-        length (no gauge is ever assumed).
+        ``line_size`` / ``sample_size``). With ``phase_unit="nanostrain"``
+        or ``"strain_rate"``: if the file does not hold a phase (raw
+        samples, I/Q, arctan, amplitude, variances…), or holds one without
+        recording its gauge length (no gauge is ever assumed). With
+        ``"strain_rate"``: if its trigger frequency is unknown (0).
     ImportError
         If the chosen backend needs an optional third-party library
         (``h5py`` / ``npTDMS`` / ``segyio``) that isn't installed. The
@@ -388,9 +436,19 @@ class File:
     _quantization_max_error_rad: Optional[float] = None
     _source_content_type: Optional[int] = None
     _trailing_bytes: int = 0
-    # `phase_unit="nanostrain"`: the gauge length the phase is divided by
-    # (set at open); `None` reads the samples as stored.
+    # `phase_unit` as opened, and for "nanostrain" / "strain_rate" the gauge
+    # length the phase is divided by (set at open; `None` reads the samples
+    # as stored).
+    _phase_unit: str = "rad"
     _strain_gauge: Optional[float] = None
+    # `phase_unit="strain_rate"`: the line rate (Hz), the gaps of the time
+    # axis (`time_gaps`, with their first lines for a bisection), and the
+    # carried line: `(i, line i as stored)`, the line the next read is
+    # differenced against when it starts at line `i + 1`.
+    _rate_hz: Optional[float] = None
+    _rate_gaps: tuple = ()
+    _rate_gap_starts: tuple = ()
+    _rate_carry: Optional[tuple] = None
 
     # Suffix → backend class name (looked up in ``_formats``). Adding a
     # new format means adding an entry here and a class in ``_formats``.
@@ -412,7 +470,8 @@ class File:
     ):
         if not isinstance(phase_unit, str) or phase_unit not in _PHASE_UNITS:
             raise ValueError(
-                f"phase_unit must be 'rad' (the default) or 'nanostrain', got {phase_unit!r}"
+                "phase_unit must be 'rad' (the default), 'nanostrain' or 'strain_rate', "
+                f"got {phase_unit!r}"
             )
         path = Path(path)
         if not path.exists():
@@ -463,13 +522,18 @@ class File:
         )
         self._source_content_type = getattr(self._backend, "source_content_type", None)
         self._trailing_bytes = int(getattr(self._backend, "trailing_bytes", 0) or 0)
-        if phase_unit == "nanostrain":
+        if phase_unit != "rad":
             try:
-                self._strain_gauge = self._nanostrain_gauge()
+                self._strain_gauge = self._nanostrain_gauge(phase_unit)
+                if phase_unit == "strain_rate":
+                    self._rate_hz = self._strain_rate_hz()
+                    self._rate_gaps = self.time_gaps
+                    self._rate_gap_starts = tuple(a for a, _ in self._rate_gaps)
             except BaseException:
                 # Refused: release the descriptor before saying why.
                 self.close()
                 raise
+            self._phase_unit = phase_unit
         _warn_about_the_header(path, self._header)
         if self._trailing_bytes:
             warnings.warn(
@@ -597,6 +661,10 @@ class File:
         if gauge is None:
             while backend.lines_left > 0:
                 yield backend.read_lines(1)[0]
+            return
+        if self._phase_unit == "strain_rate":
+            while backend.lines_left > 0:
+                yield self._read_strain_rate(backend, 1)[0]
             return
         pairs = bool(self._header.is_interleaved)
         while backend.lines_left > 0:
@@ -970,8 +1038,9 @@ class File:
         (``Header.mode_from_flags``): content type 0, a value this SDK does
         not know, a file written before data format v1 whose content type
         does not describe it. A phase read with ``phase_unit="nanostrain"``
-        is ``"strain"`` (``"strain+amplitude"`` for pairs)."""
-        return _join_members(self._header, "quantity", strain=self._strain_gauge is not None)
+        is ``"strain"`` (``"strain+amplitude"`` for pairs), with
+        ``phase_unit="strain_rate"`` ``"strain rate"``."""
+        return _join_members(self._header, "quantity", phase_unit=self._phase_unit)
 
     @property
     def unit(self) -> Optional[str]:
@@ -981,15 +1050,16 @@ class File:
         ``"dimensionless"``, ``"script"`` — or ``"rad+count"`` for a file of
         pairs; ``None`` when the content type does not say (see
         :attr:`quantity`). A phase read with ``phase_unit="nanostrain"`` is
-        in ``"nm/m"`` (``"nm/m+count"`` for pairs)."""
-        return _join_members(self._header, "unit", strain=self._strain_gauge is not None)
+        in ``"nm/m"`` (``"nm/m+count"`` for pairs), with
+        ``phase_unit="strain_rate"`` in ``"nm/m/s"``."""
+        return _join_members(self._header, "unit", phase_unit=self._phase_unit)
 
     @property
     def phase_unit(self) -> str:
-        """How the phase is read: ``"rad"`` (as stored, the default) or
-        ``"nanostrain"`` (strain in nm/m) — the ``phase_unit`` the file was
-        opened with."""
-        return "rad" if self._strain_gauge is None else "nanostrain"
+        """How the phase is read: ``"rad"`` (as stored, the default),
+        ``"nanostrain"`` (strain in nm/m) or ``"strain_rate"`` (strain rate
+        in nm/m/s) — the ``phase_unit`` the file was opened with."""
+        return self._phase_unit
 
     @property
     def gauge_length_m(self) -> Optional[float]:
@@ -1025,6 +1095,43 @@ class File:
             return nanostrain_factor(g)
         except ValueError:
             return None
+
+    @property
+    def strain_rate_per_rad(self) -> Optional[float]:
+        """The factor a phase increment between two lines of this file is
+        multiplied by to read in nm/m/s: ``NANOSTRAIN_PER_RAD_METRE /
+        gauge_length_m × trig_frequency_real_hz``, computed once in float64
+        and rounded once to float32 (the factor of the ``float32`` samples),
+        whatever ``phase_unit`` the file was opened with — or ``None``
+        without a gauge length or a trigger frequency."""
+        g = _gauge_of(self._header)
+        if g is None:
+            return None
+        try:
+            return strain_rate_factor(g, self.trig_frequency_real_hz)
+        except ValueError:
+            return None
+
+    @property
+    def time_gaps(self) -> tuple:
+        """The gaps of the file's time axis, as ``(first, end)`` ranges of
+        lines (``end`` excluded): every line ``i ≥ 1`` that comes more than
+        1.5 line periods (``1 / trig_frequency_real_hz``) after line
+        ``i − 1`` on the corrected time axis (:meth:`line_time_ns`) — the
+        line after shots the card lost. Their strain increment spans more
+        than one line period: ``phase_unit="strain_rate"`` reads them NaN.
+
+        Only a file stamped from the card's time map carries the times of
+        its lines (:attr:`time_correction` ``"cardclock-v1"``, HDF5); on any
+        other file the lines are timed by their count and this is ``()``:
+        every increment is taken as one line period. Shots lost inside a
+        stretch the acquisition could only interpolate
+        (:attr:`time_correction_state` ``"provisional"``) are spread over it
+        and not seen here. Metadata only: works on a closed file."""
+        return _line_gaps(
+            self._time_axis, self._header.line_timing, self._num_lines,
+            self.trig_frequency_real_hz,
+        )
 
     @property
     def source_content_type(self) -> Optional[int]:
@@ -1230,18 +1337,46 @@ class File:
         Read up to ``n`` consecutive pulses (rows). Returns a
         ``(rows, line_size)`` typed numpy array — dtype is
         :attr:`dtype`. With ``phase_unit="nanostrain"`` the phase samples
-        come in nm/m (converted in place on the buffer just read).
+        come in nm/m (converted in place on the buffer just read); with
+        ``phase_unit="strain_rate"`` in nm/m/s, differenced against the
+        line before the first one read (NaN on line 0 and after a gap, see
+        :class:`File`).
 
         Short-reads are tolerated: when fewer than ``n`` pulses remain,
         returns what's left. Raises :class:`OSError` only when the
         reader is already exhausted; raises :class:`ValueError` if
         ``n <= 0``.
         """
-        block = self._require_open().read_lines(n)
+        backend = self._require_open()
         gauge = self._strain_gauge
         if gauge is None:
-            return block
-        return _phase_to_nanostrain(block, gauge, bool(self._header.is_interleaved))
+            return backend.read_lines(n)
+        if self._phase_unit == "strain_rate":
+            return self._read_strain_rate(backend, n)
+        return _phase_to_nanostrain(backend.read_lines(n), gauge, bool(self._header.is_interleaved))
+
+    def _read_strain_rate(self, backend, n: int) -> np.ndarray:
+        """``backend.read_lines(n)`` read as strain rate: differenced against
+        the carried line when it is the one before the cursor, else against
+        the line before the cursor read back from the file (the cursor moved:
+        a seek, a rewind) — NaN before line 0; then NaN on the lines that
+        follow a gap of the time axis."""
+        first = self._num_lines - backend.lines_left
+        carry = self._rate_carry
+        prev = None
+        if carry is not None and carry[0] == first - 1:
+            prev = carry[1]
+        elif first > 0:
+            backend.seek(first - 1)
+            prev = backend.read_lines(1)[0]  # the cursor is back at `first`
+        block = backend.read_lines(n)
+        pairs = bool(self._header.is_interleaved)
+        block, prev = _phase_to_strain_rate(block, prev, self._strain_gauge, self._rate_hz, pairs)
+        rows = block.shape[0]
+        if rows:
+            self._rate_carry = (first + rows - 1, prev)
+            _nan_after_gaps(block, first, self._rate_gaps, self._rate_gap_starts, pairs)
+        return block
 
     def read_all(self) -> np.ndarray:
         """
@@ -1288,8 +1423,8 @@ class File:
         of ``start`` — the corrected time on a file stamped from the card's
         time map. The data is copied ``chunk_lines`` lines at a time; the
         read cursor is put back where it was. The samples are the file's
-        own, as stored: a file opened with ``phase_unit="nanostrain"``
-        still exports its phase in radians.
+        own, as stored: a file opened with ``phase_unit="nanostrain"`` or
+        ``"strain_rate"`` still exports its phase in radians.
         """
         start = operator.index(start)
         if not 0 <= start <= self._num_lines:
@@ -1413,13 +1548,15 @@ class File:
         demodulation's, :attr:`content_type_name` says which) or the phase
         member of phase/amplitude pairs (:attr:`Mode.PHASE_AMPLITUDE`).
         Returns ``(rows, positions_per_line)`` ``float32``. On a file opened
-        with ``phase_unit="nanostrain"``: strain, in nm/m.
+        with ``phase_unit="nanostrain"``: strain, in nm/m; with
+        ``phase_unit="strain_rate"``: strain rate, in nm/m/s (NaN on line 0
+        and after a gap, see :class:`File`).
 
         On a phase file passing ``data`` returns it unchanged; passing
         nothing reads ``n`` new pulses. ``data`` is taken as
-        :meth:`read_lines` of this file returned it (already in nm/m on a
-        file opened with ``phase_unit="nanostrain"``): it is never
-        converted again.
+        :meth:`read_lines` of this file returned it (already in nm/m or
+        nm/m/s on a file opened with ``phase_unit="nanostrain"`` or
+        ``"strain_rate"``): it is never converted again.
         """
         if self._require_mode("get_phase", Mode.PHASE, Mode.PHASE_AMPLITUDE) is Mode.PHASE:
             return self._column(data, n)
@@ -1628,13 +1765,18 @@ class File:
             f"Inspect file.mode to dispatch — see the Mode enum docs."
         )
 
-    def _nanostrain_gauge(self) -> float:
-        """The gauge length ``phase_unit="nanostrain"`` divides by, or the
-        :class:`ValueError` that says why this file cannot be read so."""
+    def _nanostrain_gauge(self, phase_unit: str) -> float:
+        """The gauge length ``phase_unit`` (``"nanostrain"`` or
+        ``"strain_rate"``) divides by, or the :class:`ValueError` that says
+        why this file cannot be read so."""
+        what = {
+            "nanostrain": f"converts a phase to strain ({STRAIN_UNIT})",
+            "strain_rate": f"converts a phase to strain rate ({STRAIN_RATE_UNIT})",
+        }[phase_unit]
         mode = self.mode
         if mode not in (Mode.PHASE, Mode.PHASE_AMPLITUDE):
             raise ValueError(
-                f"{self._path}: phase_unit='nanostrain' converts a phase to strain (nm/m), "
+                f"{self._path}: phase_unit={phase_unit!r} {what}, "
                 f"and this file holds {self.content_type_name!r} (content type "
                 f"{self.content_type}, mode {mode.value!r}), not a phase. Open it with "
                 "phase_unit='rad' (the default)."
@@ -1642,7 +1784,7 @@ class File:
         gauge = self.gauge_length_m
         if gauge is None:
             raise ValueError(
-                f"{self._path}: phase_unit='nanostrain' needs the gauge length the phase "
+                f"{self._path}: phase_unit={phase_unit!r} needs the gauge length the phase "
                 f"was measured over, and this file ({self.content_type_name!r}, content "
                 f"type {self.content_type}) does not record its gauge length "
                 "(gauge_length_m is absent: a recording made before 2026-11, a MOZART or "
@@ -1652,6 +1794,22 @@ class File:
             )
         nanostrain_factor(gauge)  # a gauge that gives no finite factor raises here
         return gauge
+
+    def _strain_rate_hz(self) -> float:
+        """The line rate ``phase_unit="strain_rate"`` multiplies by
+        (:attr:`trig_frequency_real_hz`), or the :class:`ValueError` that
+        says why this file has none."""
+        hz = self.trig_frequency_real_hz
+        if not (math.isfinite(hz) and hz > 0.0):
+            raise ValueError(
+                f"{self._path}: phase_unit='strain_rate' multiplies each line's strain "
+                "increment by the trigger frequency, and this file's is unknown "
+                f"(trig_frequency = {self._header.trig_frequency} Hz, and no real rate "
+                "recorded). No rate is assumed: read it as strain (phase_unit="
+                "'nanostrain') or in radians."
+            )
+        strain_rate_factor(self._strain_gauge, hz)  # no finite factor: raises here
+        return hz
 
     # ── Introspection ──────────────────────────────────────────────────
 
@@ -1663,8 +1821,8 @@ class File:
             # Construction failed before the header was read.
             return f"File({path!r}, unopened)"
         state = ", closed" if self.closed else ""
-        if self._strain_gauge is not None:
-            state = f", phase_unit='nanostrain'{state}"
+        if self._phase_unit != "rad":
+            state = f", phase_unit={self._phase_unit!r}{state}"
         real = (
             ""
             if self.trig_frequency_is_exact
@@ -1715,24 +1873,22 @@ def _warn_about_the_header(path: Path, h: Header) -> None:
         )
 
 
-#: The quantity and unit a phase reads as with ``phase_unit="nanostrain"``.
-_STRAIN_COLUMNS = {"quantity": "strain", "unit": STRAIN_UNIT}
-
-
-def _join_members(h: Header, field: str, *, strain: bool = False) -> Optional[str]:
+def _join_members(h: Header, field: str, *, phase_unit: str = "rad") -> Optional[str]:
     """A registry column (``quantity`` / ``unit``) of a header's content
     type: the value, or ``m0+m1`` for a pair; ``None`` when the content type
     does not say what the samples are and the mode comes from the flags
     (``Header.mode_from_flags``: 0, unknown, contradicted, a pre-v1
     ``sw_custom`` file, a pre-v1 unpaired file of a stream-only value).
-    ``strain``: a phase (column or member) reads as strain in nm/m."""
+    ``phase_unit``: what a phase (column or member) reads as
+    (:data:`_PHASE_READ_AS`)."""
     ct = h.normalized_content_type
     info = _content.info(ct)
     if h.mode_from_flags:
         return None
+    read_as = _PHASE_READ_AS.get(phase_unit)
 
     def column(quantity: str, value: str) -> str:
-        return _STRAIN_COLUMNS[field] if strain and quantity == "phase" else value
+        return read_as[field] if read_as is not None and quantity == "phase" else value
 
     if info.members is not None:
         return "+".join(column(m.quantity, getattr(m, field)) for m in info.members)
@@ -1767,6 +1923,106 @@ def _phase_to_nanostrain(block: np.ndarray, gauge: float, pairs: bool) -> np.nda
         block = np.array(block, dtype=dt.newbyteorder("="), order="C")
     phase_to_nanostrain(block, gauge, interleaved=pairs)
     return block
+
+
+# ── Strain rate: THE definition ─────────────────────────────────────────────
+#
+#     strain_rate[n] = (strain[n] − strain[n−1]) × f_trig            [nm/m/s]
+#                    = (phase[n] − phase[n−1]) × K / g × f_trig
+#
+# with K = NANOSTRAIN_PER_RAD_METRE, g = gauge_length_m and f_trig =
+# trig_frequency_real_hz. A phase file holds the accumulated (unwrapped)
+# phase of each line, so this is the strain increment of one line period
+# times the line rate. Every read path of `File(phase_unit="strain_rate")`
+# goes through `_phase_to_strain_rate` (the native `phase_to_strain_rate`
+# kernel, src/strain.rs); line 0 and the lines after a time-axis gap read
+# NaN (`File._read_strain_rate`, `_nan_after_gaps`). A different definition
+# (another quantity times f_trig, another first-line convention) changes
+# here and in the kernel, nowhere else.
+
+
+def _phase_to_strain_rate(
+    block: np.ndarray, prev: Optional[np.ndarray], gauge: float, rate_hz: float, pairs: bool
+) -> tuple:
+    """``(block, prev)``: ``block`` as read, its phase converted to nm/m/s in
+    the native core — line ``n`` becomes ``(x[n] − x[n−1]) × K / g ×
+    f_trig``, line ``−1`` being ``prev`` (the line before the block as
+    stored, ``None`` for none: NaN) — in place on the buffer the backend
+    just allocated (a copy only when it is not a C-contiguous, writeable,
+    native-endian array); ``prev`` on return is the block's last line as
+    stored, for the next block. Every sample is converted, or for ``pairs``
+    the phase lanes. An integer array under a phase content type is no
+    phase in radians and is refused."""
+    dt = block.dtype
+    if dt.kind != "f" or dt.itemsize not in (4, 8):
+        raise ValueError(
+            f"phase samples stored as {dt} are not radians: they cannot be read in "
+            f"{STRAIN_RATE_UNIT} (phase_unit='strain_rate')"
+        )
+    if not (block.flags.c_contiguous and block.flags.writeable and dt.isnative):
+        block = np.array(block, dtype=dt.newbyteorder("="), order="C")
+    line = block.shape[-1]
+    if prev is None:
+        prev = np.full(line, np.nan, dtype=block.dtype)
+    elif not (prev.dtype == block.dtype and prev.flags.c_contiguous and prev.flags.writeable):
+        prev = np.array(prev, dtype=block.dtype, order="C")
+    phase_to_strain_rate(block, prev, gauge, rate_hz, interleaved=pairs)
+    return block, prev
+
+
+def _nan_after_gaps(block: np.ndarray, first: int, gaps: tuple, starts: tuple, pairs: bool) -> None:
+    """NaN in the phase lanes of the rows of ``block`` (file lines ``first``
+    onwards) that follow a gap of the time axis: ``gaps`` holds sorted,
+    disjoint ``(first, end)`` ranges, ``starts`` their first lines."""
+    if not gaps:
+        return
+    end = first + block.shape[0]
+    k = max(0, bisect.bisect_right(starts, first) - 1)
+    lanes = slice(0, None, 2) if pairs else slice(None)
+    while k < len(gaps) and gaps[k][0] < end:
+        lo, hi = max(gaps[k][0], first), min(gaps[k][1], end)
+        if lo < hi:
+            block[lo - first:hi - first, lanes] = np.nan
+        k += 1
+
+
+def _line_gaps(axis, timing, num_lines: int, rate_hz: float) -> tuple:
+    """The ranges of :attr:`File.time_gaps`: on a corrected time axis, the
+    lines ``i ≥ 1`` with ``t(i) − t(i − 1) > 1.5 / rate_hz`` s. A time axis
+    is affine between its nodes, so only a node's own line (the forward step
+    of lost shots) and the inside of a segment whose period is that long
+    can be one; each is checked once, with the integers of
+    :meth:`File.line_time_ns`."""
+    if axis is None or not axis.corrected or num_lines < 2:
+        return ()
+    if not (math.isfinite(rate_hz) and rate_hz > 0.0):
+        return ()
+    limit = _GAP_PERIODS * 1e9 / rate_hz
+
+    def dt(i: int) -> int:
+        t = _axis_time_ns(axis.lines, axis.ns, axis.period_fs, timing, i)
+        return t - _axis_time_ns(axis.lines, axis.ns, axis.period_fs, timing, i - 1)
+
+    gaps: list = []
+
+    def add(lo: int, hi: int) -> None:
+        if gaps and gaps[-1][1] >= lo:
+            gaps[-1] = (gaps[-1][0], max(gaps[-1][1], hi))
+        else:
+            gaps.append((lo, hi))
+
+    knots = axis.lines
+    for k, start in enumerate(knots):
+        end = min(knots[k + 1] if k + 1 < len(knots) else num_lines, num_lines)
+        # The node's line: the step a lost shot adds (node 0 starts the
+        # axis, the lines before it run on its own segment).
+        if k > 0 and 1 <= start < num_lines and dt(start) > limit:
+            add(start, start + 1)
+        # Inside the segment: its period.
+        lo = 1 if k == 0 else max(start + 1, 1)
+        if lo < end and dt(lo) > limit:
+            add(lo, end)
+    return tuple(gaps)
 
 
 def _amplitude_unit(h: Header) -> Optional[str]:

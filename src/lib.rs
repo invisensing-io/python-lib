@@ -25,7 +25,10 @@
 //! - The phase to strain conversion ([`strain`]): the constant
 //!   `NANOSTRAIN_PER_RAD_METRE`, [`nanostrain_factor`] and the in-place
 //!   [`phase_to_nanostrain`], with AVX-512 / AVX2 kernels chosen at run time
-//!   ([`simd_level`]), bit-identical to the scalar loop.
+//!   ([`simd_level`]), bit-identical to the scalar loop; and the strain rate,
+//!   [`strain_rate_factor`] and the in-place [`phase_to_strain_rate`]
+//!   (`(x[n] − x[n−1]) × factor`, one line carried from a block to the
+//!   next), with the same tiers and the same bit-identity.
 //!
 //! All hot kernels operate on contiguous-memory views (`as_slice`) and use
 //! `chunks_exact(2)` so LLVM can auto-vectorise the stride-2 reads. The
@@ -1813,6 +1816,145 @@ fn phase_to_nanostrain(
     )))
 }
 
+// ── Phase to strain rate (nm/m/s) ───────────────────────────────────────────
+
+/// The factor a phase increment (rad) between two lines of a file whose
+/// gauge is `gauge_length_m` metres and whose lines come at
+/// `trig_frequency_hz` is multiplied by to read in nm/m/s:
+/// `NANOSTRAIN_PER_RAD_METRE / gauge_length_m × trig_frequency_hz`, computed
+/// once in f64 and rounded once to float32 (the factor of float32 samples,
+/// returned as the Python float of that f32). Raises `ValueError` when the
+/// gauge is not a length, the rate is not a rate (zero, negative, not
+/// finite), or the factor is not finite.
+#[pyfunction]
+fn strain_rate_factor(gauge_length_m: f64, trig_frequency_hz: f64) -> PyResult<f64> {
+    strain::rate_factor_f32(gauge_length_m, trig_frequency_hz)
+        .map(f64::from)
+        .ok_or_else(|| bad_rate(gauge_length_m, trig_frequency_hz))
+}
+
+fn bad_rate(gauge_length_m: f64, trig_frequency_hz: f64) -> PyErr {
+    if strain::factor_f64(gauge_length_m).is_none() {
+        return bad_gauge(gauge_length_m);
+    }
+    PyValueError::new_err(format!(
+        "trig_frequency_hz = {trig_frequency_hz} Hz is not a line rate, or gives no finite \
+         strain-rate factor with gauge_length_m = {gauge_length_m} m (the rate must be a finite \
+         frequency above zero)"
+    ))
+}
+
+/// Convert a block of phase lines, in radians, to strain rate in nm/m/s
+/// **in place**: line `n` becomes `(x[n] − x[n−1]) × NANOSTRAIN_PER_RAD_METRE
+/// / gauge_length_m × trig_frequency_hz` — one subtraction in the array's
+/// precision, then one multiply by the factor computed once (f64, rounded
+/// once to f32 for a `float32` array — [`strain_rate_factor`]; kept f64 for
+/// a `float64` one).
+///
+/// - `array`: a C-contiguous, writeable, native-endian `float32` or
+///   `float64` numpy array of whole lines; its last dimension is the line
+///   length. It is modified and not returned.
+/// - `previous`: a C-contiguous, writeable array of the same dtype holding
+///   ONE line (`previous.size` = the line length): on entry the line before
+///   the block's first line (fill it with NaN when there is none: the first
+///   line's phase lanes are then NaN); on return the block's last line as it
+///   was stored, ready for the next block. A block of zero lines leaves it
+///   as it is.
+/// - `interleaved=True`: `[phase, amplitude, …]` pairs; only the phases are
+///   converted, the amplitudes keep their bits. The line length must be
+///   even.
+/// - `simd`: as [`phase_to_nanostrain`]. Every kernel gives the same bits.
+///
+/// Returns the kernel used. The GIL is released for large arrays.
+#[pyfunction]
+#[pyo3(signature = (array, previous, gauge_length_m, trig_frequency_hz, *, interleaved = false, simd = None))]
+fn phase_to_strain_rate(
+    py: Python<'_>,
+    array: &Bound<'_, PyAny>,
+    previous: &Bound<'_, PyAny>,
+    gauge_length_m: f64,
+    trig_frequency_hz: f64,
+    interleaved: bool,
+    simd: Option<&str>,
+) -> PyResult<&'static str> {
+    let tier = match simd {
+        None => strain::active_tier(),
+        Some(name) => strain::Tier::parse(name).ok_or_else(|| {
+            PyValueError::new_err(format!("simd must be 'scalar', 'avx2' or 'avx512', got {name:?}"))
+        })?,
+    };
+    let check = |shape: &[usize], contiguous: bool, prev_shape: &[usize], prev_contiguous: bool| -> PyResult<()> {
+        if !contiguous || !prev_contiguous {
+            return Err(PyValueError::new_err("phase_to_strain_rate needs C-contiguous arrays"));
+        }
+        let line: usize = prev_shape.iter().product();
+        if line == 0 || shape.last() != Some(&line) {
+            return Err(PyValueError::new_err(format!(
+                "previous must hold one line of the array: the array's last dimension \
+                 (shape {shape:?}) must equal previous.size ({line}, shape {prev_shape:?}), above zero"
+            )));
+        }
+        if interleaved && !line.is_multiple_of(2) {
+            return Err(PyValueError::new_err(format!(
+                "interleaved pairs need an even line length (got {line})"
+            )));
+        }
+        Ok(())
+    };
+    let busy = |e: numpy::BorrowError| PyValueError::new_err(format!("{e}"));
+    if let Ok(a) = array.downcast::<numpy::PyArrayDyn<f32>>() {
+        let p = previous
+            .downcast::<numpy::PyArrayDyn<f32>>()
+            .map_err(|_| other_dtype(previous, "float32"))?;
+        let factor = strain::rate_factor_f32(gauge_length_m, trig_frequency_hz)
+            .ok_or_else(|| bad_rate(gauge_length_m, trig_frequency_hz))?;
+        let mut rw = a.try_readwrite().map_err(busy)?;
+        let mut prw = p.try_readwrite().map_err(busy)?;
+        check(rw.shape(), rw.is_c_contiguous(), prw.shape(), prw.is_c_contiguous())?;
+        let data = rw.as_slice_mut().map_err(|e| PyValueError::new_err(format!("{e}")))?;
+        let prev = prw.as_slice_mut().map_err(|e| PyValueError::new_err(format!("{e}")))?;
+        let used = if data.len() >= strain::GIL_RELEASE_MIN_SAMPLES {
+            py.allow_threads(|| strain::diff_scale_f32(tier, data, prev, factor, interleaved))
+        } else {
+            strain::diff_scale_f32(tier, data, prev, factor, interleaved)
+        };
+        return Ok(used.as_str());
+    }
+    if let Ok(a) = array.downcast::<numpy::PyArrayDyn<f64>>() {
+        let p = previous
+            .downcast::<numpy::PyArrayDyn<f64>>()
+            .map_err(|_| other_dtype(previous, "float64"))?;
+        let factor = strain::rate_factor_f64(gauge_length_m, trig_frequency_hz)
+            .ok_or_else(|| bad_rate(gauge_length_m, trig_frequency_hz))?;
+        let mut rw = a.try_readwrite().map_err(busy)?;
+        let mut prw = p.try_readwrite().map_err(busy)?;
+        check(rw.shape(), rw.is_c_contiguous(), prw.shape(), prw.is_c_contiguous())?;
+        let data = rw.as_slice_mut().map_err(|e| PyValueError::new_err(format!("{e}")))?;
+        let prev = prw.as_slice_mut().map_err(|e| PyValueError::new_err(format!("{e}")))?;
+        let used = if data.len() >= strain::GIL_RELEASE_MIN_SAMPLES {
+            py.allow_threads(|| strain::diff_scale_f64(tier, data, prev, factor, interleaved))
+        } else {
+            strain::diff_scale_f64(tier, data, prev, factor, interleaved)
+        };
+        return Ok(used.as_str());
+    }
+    Err(PyTypeError::new_err(format!(
+        "phase_to_strain_rate converts a native float32 or float64 numpy array, got {}",
+        dtype_name(array)
+    )))
+}
+
+fn dtype_name(array: &Bound<'_, PyAny>) -> String {
+    array.getattr("dtype").map_or_else(|_| array.get_type().to_string(), |d| d.to_string())
+}
+
+fn other_dtype(previous: &Bound<'_, PyAny>, want: &str) -> PyErr {
+    PyTypeError::new_err(format!(
+        "previous must be a native {want} numpy array, like the array; got {}",
+        dtype_name(previous)
+    ))
+}
+
 /// The kernel [`phase_to_nanostrain`] uses by default: `"avx512"`
 /// (AVX-512F), `"avx2"` or `"scalar"` — the widest this CPU runs, detected
 /// once, capped by the environment variable `INVISENSING_SIMD`
@@ -1852,6 +1994,8 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(split_pair_f32_secondary, m)?)?;
     m.add_function(wrap_pyfunction!(nanostrain_factor, m)?)?;
     m.add_function(wrap_pyfunction!(phase_to_nanostrain, m)?)?;
+    m.add_function(wrap_pyfunction!(strain_rate_factor, m)?)?;
+    m.add_function(wrap_pyfunction!(phase_to_strain_rate, m)?)?;
     m.add_function(wrap_pyfunction!(simd_level, m)?)?;
     m.add_function(wrap_pyfunction!(simd_levels, m)?)?;
     // nm/m of strain per rad/m of phase over the gauge (110.37), see

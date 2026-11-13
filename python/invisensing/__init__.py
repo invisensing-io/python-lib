@@ -41,6 +41,14 @@ length it was measured over (``File.gauge_length_m``)::
 ``NANOSTRAIN_PER_RAD_METRE`` = 110.37 nm/m per rad/m, from
 ``ΔΦ = 2β(n + Cε)·ε·L`` at λ = 1550.12 nm and n = 1.46.
 
+Or as strain rate, in nm/m/s: the strain increment from the previous line
+times the real trigger frequency (NaN on line 0 and after a gap of the
+time axis)::
+
+    with File("phase/2026-11-03_10-00-00.h5", phase_unit="strain_rate") as f:
+        rate = f.get_phase()     # (phase[n] - phase[n-1]) / gauge_length_m
+                                 #   * NANOSTRAIN_PER_RAD_METRE * trig_frequency_real_hz
+
 The legacy SDK is preserved verbatim::
 
     import invisensing.File as iFile
