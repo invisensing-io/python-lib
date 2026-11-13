@@ -411,6 +411,79 @@ memory-bound: about the speed of numpy's in-place `np.multiply(a, f,
 out=a)`, four times faster than `a / g * K`, which allocates two
 temporaries.
 
+### Phase as strain rate, in nm/m/s (since 1.6.0)
+
+A phase file holds the accumulated (unwrapped) phase of each line, not a
+per-line increment. `File(path, phase_unit="strain_rate")` reads every
+phase sample as the **strain rate** of its line, in **nm/m/s**: the strain
+increment from the previous line times the line rate.
+
+```text
+strain_rate[n] [nm/m/s] = (strain[n] − strain[n−1]) [nm/m] × f_trig [Hz]
+                        = (phase[n] − phase[n−1]) [rad] × NANOSTRAIN_PER_RAD_METRE / gauge_length_m × f_trig
+```
+
+`strain` is the `phase_unit="nanostrain"` reading above, and `f_trig` the
+rate the card really fired at, `File.trig_frequency_real_hz` — the
+requested `trig_frequency` on a file that does not carry the exact clock
+(see [Requested vs. real trigger frequency](#requested-vs-real-trigger-frequency)).
+
+```python
+from invisensing import File
+
+with File("phase/2026-11-12_10-00-00.h5", phase_unit="strain_rate") as f:
+    f.strain_rate_per_rad     # float32(110.37 / 9.6 × f_trig) — the factor applied
+    f.unit, f.quantity        # "nm/m/s", "strain rate"  (f.mode stays Mode.PHASE)
+    rate = f.get_phase()      # float32, nm/m/s — rate[0] is NaN
+    f.time_gaps               # ((10, 11), ...) — the lines after lost shots
+```
+
+A phase ramp of `a` rad per line reads `a × 110.37 / g × f_trig` nm/m/s
+on every line; a sine `sin(ωt)` reads `2 f_trig sin(ω / 2f_trig) ·
+cos(ω(t − 1/2f_trig)) × 110.37 / g`, i.e. `ω cos(ωt) × 110.37 / g` half a
+period earlier, to first order in `ω / f_trig`.
+
+**Line 0 is NaN.** The first line of a file has no previous line: its
+phase lanes read NaN. A file is read on its own; the previous file of the
+same recording is never opened.
+
+**Gaps are NaN.** On an HDF5 stamped from the card's time map
+(`File.time_correction == "cardclock-v1"`), `File.time_gaps` lists, as
+`(first, end)` ranges, the lines that come more than 1.5 line periods
+after the previous one on the corrected time axis — the line after shots
+the card lost. Their increment spans several periods: they read NaN, never
+an increment divided by one period. A file timed by its count (DAT, TDMS,
+SEG-Y, an HDF5 without the time map) carries no gap: every increment is
+taken as one period. A drift of the card's oscillator is no gap (the line
+rate stays `trig_frequency_real_hz`, like a spectrum's sampling rate).
+
+**Blocks and seeks are seamless.** Every read path (`read_lines`,
+`read_all`, iteration, `get_phase`, `channels`, `get_lines`) carries the
+last line it read, as stored, to the next read: reading the file in blocks
+of any size gives the bits of `read_all()`. After `seek_lines(k)` or
+`rewind()`, the next read first reads line `k − 1` back (nothing for
+line 0), so an oscilloscope that seeks one line per frame gets the same
+values as a straight read.
+
+**Refusals.** Those of `phase_unit="nanostrain"` (no phase, no gauge
+length), and a file whose trigger frequency is unknown (`trig_frequency`
+0): a `ValueError` at open.
+
+**Precision.** The factor `NANOSTRAIN_PER_RAD_METRE / gauge_length_m ×
+f_trig` is computed once in float64 and rounded once to float32; each phase
+sample then takes one float32 subtraction of the previous line's stored
+phase and one float32 multiply by the factor, in that order — exactly
+`(x[n] - x[n-1]) * np.float32(110.37 / g * f_trig)`, never `x[n]·f −
+x[n−1]·f`, never a fused multiply-add. A float64 phase is converted in
+float64. Pairs: only the phase lanes; the amplitude keeps its bits.
+`export_dat()` writes radians.
+
+**Speed.** One in-place pass in the Rust core (subtract, multiply, keep the
+line for the next block) with the AVX-512F / AVX2 / scalar kernels of the
+strain, bit-identical to each other. Memory-bound: on a 268 MB float32
+block it runs at memcpy speed (≈ 11 GB/s on one core of an AVX-512
+server), ≈ 3.7× numpy's `np.diff(a, axis=0) * f`.
+
 ---
 
 ## Streaming large files
@@ -561,7 +634,9 @@ fired at an inexact rate is refused: a DAT never carries one.
   source format.
 - The phase to strain conversion (`phase_unit="nanostrain"`) is one
   in-place multiply per sample with AVX-512F / AVX2 kernels chosen at run
-  time, bit-identical to the scalar loop (see above).
+  time, bit-identical to the scalar loop (see above); the strain rate
+  (`phase_unit="strain_rate"`) one in-place subtract-then-multiply pass on
+  the same tiers.
 
 ### Safety
 

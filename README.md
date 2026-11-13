@@ -492,6 +492,54 @@ strain [nm/m] = phase [rad] / gauge_length_m [m] × NANOSTRAIN_PER_RAD_METRE
 - `export_dat` still writes the file's own samples, in radians.
 - `phase_unit="rad"`, the default, reads every file exactly as before.
 
+## Phase as strain rate, in nm/m/s (since 1.6.0)
+
+A phase file holds the accumulated (unwrapped) phase of each line. Open it
+with `phase_unit="strain_rate"` and every phase sample is read as the
+**strain rate** of its line, in **nm/m/s**: the strain increment from the
+previous line times the line rate.
+
+```text
+strain_rate[n] [nm/m/s] = (strain[n] − strain[n−1]) [nm/m] × f_trig [Hz]
+                        = (phase[n] − phase[n−1]) [rad] × NANOSTRAIN_PER_RAD_METRE / gauge_length_m × f_trig
+```
+
+`strain` is the `phase_unit="nanostrain"` reading above and `f_trig` the
+rate the card really fired at, `File.trig_frequency_real_hz` (the requested
+`trig_frequency` on a file that does not carry the exact clock).
+
+```python
+with File("phase/2026-11-12_10-00-00.h5", phase_unit="strain_rate") as f:
+    f.unit, f.quantity          # "nm/m/s", "strain rate"
+    f.strain_rate_per_rad       # float32(110.37 / 9.6 × f_trig): the factor
+    rate = f.get_phase()        # float32, nm/m/s; rate[0] is NaN
+    f.time_gaps                 # ((first, end), ...): lines after lost shots
+```
+
+- **Line 0 is NaN** in its phase lanes: nothing precedes it (a file is
+  read on its own; the previous file of the recording is never opened).
+- **Gaps are NaN**: a line that comes more than 1.5 line periods after the
+  previous one on the file's corrected time axis (`File.time_gaps`, an HDF5
+  stamped from the card's time map: the line after shots the card lost)
+  holds an increment over several periods; it reads NaN rather than being
+  divided by one period. A file timed by its count (DAT, TDMS, SEG-Y, an
+  HDF5 without the time map) carries no gap: every increment is taken as
+  one period.
+- **Blocks and seeks are seamless**: every read path (`read_lines`,
+  `read_all`, iteration, `get_phase`, `channels`, `get_lines`) carries the
+  previous line; reading the file in blocks of any size gives the bits of
+  `read_all()`, and a read after `seek_lines(k)` reads line `k − 1` first.
+- **Exact arithmetic order**: the factor `NANOSTRAIN_PER_RAD_METRE /
+  gauge_length_m × f_trig` is computed once in float64 and rounded once to
+  float32; each phase sample takes one float32 subtraction of the previous
+  line's stored phase, then one multiply by the factor (float64 throughout
+  for a float64 dataset). Same AVX-512 / AVX2 / scalar kernels as the
+  strain, bit-identical to each other.
+- **Refusals** (`ValueError` at open): those of `"nanostrain"`, and a file
+  whose trigger frequency is unknown (0).
+- Pairs: only the phase lanes; the amplitude keeps its bits.
+  `export_dat` still writes radians.
+
 ## Writing files
 
 ```python
@@ -597,6 +645,13 @@ into a numpy array in Python.
   AVX-512 server it runs at the speed of numpy's in-place multiply
   (≈ 2.6·10⁹ samples/s, ≈ 21 GB/s read + write) and adds ≈ 7 % to a
   `read_all()` of a DAT from the page cache.
+- **Phase to strain rate** (`phase_unit="strain_rate"`) is one in-place
+  pass (subtract the previous line, multiply) on the same kernels; also
+  memory-bound. On a 268 MB float32 block (out of cache, one core of an
+  AVX-512 server) it runs at memcpy speed, ≈ 11 GB/s of phase converted
+  (scalar 8.4, AVX2 10.1, AVX-512 11.0 GB/s; `np.copyto` 10.8 GB/s), ≈ 3.7×
+  numpy's `np.diff(a, axis=0) * f` (3.0 GB/s), which allocates two arrays
+  and makes four passes.
 
 Measured on a recent laptop (single-threaded, release build):
 
@@ -627,8 +682,9 @@ kernels — so a future refactor can't silently re-introduce the
   `tests/test_performance.py`. The strain kernels add the calls of their
   `#[target_feature]` functions, made only once the CPU is known to run
   the feature, and unaligned vector loads and stores within chunks of
-  exactly one vector; every kernel is checked bit for bit against the
-  scalar loop (`src/strain.rs`, `tests/test_strain_kernels.py`).
+  exactly one vector; every kernel (strain and strain rate) is checked
+  bit for bit against the scalar loop (`src/strain.rs`,
+  `tests/test_strain_kernels.py`).
 - **Clear Python exceptions** instead of crashes: every error path
   (missing file, malformed header, short read, wrong mode for the
   extractor) raises a typed `OSError` / `ValueError` / `FileNotFoundError`

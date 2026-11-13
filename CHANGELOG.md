@@ -7,7 +7,8 @@ see differently, then what is new.
 ## 1.6.0
 
 Reads the gauge length a producer applied to a phase (recorded since
-2026-11), and can read a phase as strain, in nm/m.
+2026-11), and can read a phase as strain, in nm/m, or as strain rate, in
+nm/m/s.
 
 ### Changed — behaviour that differs from 1.5.0
 
@@ -55,6 +56,33 @@ Reads the gauge length a producer applied to a phase (recorded since
   `INVISENSING_SIMD=scalar|avx2|avx512` caps it.
 - `quantization_step_rad` and `quantization_max_error_rad` stay in
   radians.
+- **`File(path, phase_unit="strain_rate")`**: the phase is read as strain
+  rate, in nm/m/s — the strain increment from the previous line times the
+  line rate: `strain_rate[n] = (strain[n] − strain[n−1]) ×
+  trig_frequency_real_hz` = `(phase[n] − phase[n−1]) ×
+  NANOSTRAIN_PER_RAD_METRE / gauge_length_m × trig_frequency_real_hz`
+  (the real rate the card fired at; the requested one on a file that does
+  not carry the exact clock). The factor is computed once in float64 and
+  rounded once to float32; each phase sample takes one float32 subtraction
+  of the previous line's stored phase, then one multiply. Every read path
+  honours it and carries the previous line across reads: reading in blocks
+  of any size gives the bits of `read_all()`, and a read after
+  `seek_lines(k)` reads line `k − 1` first. **Line 0 reads NaN** (no
+  previous line; the previous file of a recording is never opened), and so
+  does every line that follows a **gap of the time axis** (`File.time_gaps`:
+  shots the card lost, on an HDF5 stamped from the card's time map) — an
+  increment over more than one line period is never divided by one. On
+  pairs only the phase lanes are converted (the amplitude keeps its bits).
+  `File.unit` is `"nm/m/s"`, `File.quantity` `"strain rate"`. Refused at
+  open like `"nanostrain"`, and when the trigger frequency is unknown (0).
+- `File.strain_rate_per_rad` (the float32 factor) and `File.time_gaps`
+  (`(first, end)` ranges of the lines more than 1.5 line periods after the
+  previous one on the corrected time axis; `()` for a file timed by its
+  count).
+- The strain rate runs in the native core, in place, in one pass, with the
+  same AVX-512F / AVX2 / scalar kernels choice, each bit-identical to the
+  scalar loop (no FMA, no reassociation): `invisensing._core.
+  strain_rate_factor()` and `phase_to_strain_rate()`.
 
 ## 1.5.0
 

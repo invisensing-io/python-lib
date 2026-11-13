@@ -120,6 +120,10 @@ the others describe the files written before it.
 `File(path, phase_unit="nanostrain")` reads a phase as strain, in nm/m:
 `phase_rad / gauge_length_m * NANOSTRAIN_PER_RAD_METRE` (see the
 [Guide](guide.md#phase-as-strain-in-nmm-since-160)).
+`File(path, phase_unit="strain_rate")` reads it as strain rate, in nm/m/s:
+`(phase[n] - phase[n-1]) * NANOSTRAIN_PER_RAD_METRE / gauge_length_m *
+trig_frequency_real_hz`, NaN on line 0 and after a gap of the time axis
+(see the [Guide](guide.md#phase-as-strain-rate-in-nmms-since-160)).
 
 | Constant | Value | Meaning |
 |---|---|---|
@@ -131,7 +135,12 @@ API): `nanostrain_factor(gauge_length_m)` (the float32 factor),
 simd=None)` (in place on a C-contiguous float32 / float64 array; returns
 the kernel used), `simd_level()` (the kernel in use: `"avx512"`, `"avx2"`
 or `"scalar"`, capped by `INVISENSING_SIMD`) and `simd_levels()` (every
-kernel this CPU runs).
+kernel this CPU runs); for the strain rate, `strain_rate_factor(
+gauge_length_m, trig_frequency_hz)` (the float32 factor) and
+`phase_to_strain_rate(array, previous, gauge_length_m, trig_frequency_hz,
+*, interleaved=False, simd=None)` (in place on whole lines; `previous` holds
+the line before the block on entry — NaN for none — and the block's last
+line as stored on return).
 
 ## Time-flag constants
 
