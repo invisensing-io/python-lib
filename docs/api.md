@@ -123,7 +123,7 @@ the others describe the files written before it.
 
 | Constant | Value | Meaning |
 |---|---|---|
-| `NANOSTRAIN_PER_RAD_METRE` | `115.0` | nm/m of strain per rad/m of phase over the gauge. **Provisional**: the final value is fixed before the release that publishes the option |
+| `NANOSTRAIN_PER_RAD_METRE` | `110.37` | nm/m of strain per rad/m of phase over the gauge, from `ΔΦ = 2β(n + Cε)·ε·L` at λ = 1550.12 nm and n = 1.46 |
 
 The native core underneath (`invisensing._core`, not part of the stable
 API): `nanostrain_factor(gauge_length_m)` (the float32 factor),

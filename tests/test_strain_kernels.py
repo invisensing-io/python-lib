@@ -69,7 +69,7 @@ def _bits(a: np.ndarray) -> np.ndarray:
 
 
 def test_the_constant_and_the_factor():
-    assert NANOSTRAIN_PER_RAD_METRE == 115.0
+    assert NANOSTRAIN_PER_RAD_METRE == 110.37
     for g in GAUGES:
         assert nanostrain_factor(g) == float(np.float32(NANOSTRAIN_PER_RAD_METRE / g))
     for bad in (0.0, -1.0, float("nan"), float("inf"), 1e-40):

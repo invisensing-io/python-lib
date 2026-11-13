@@ -38,8 +38,8 @@ length it was measured over (``File.gauge_length_m``)::
     with File("phase/2026-11-03_10-00-00.h5", phase_unit="nanostrain") as f:
         strain = f.get_phase()   # phase_rad / gauge_length_m * NANOSTRAIN_PER_RAD_METRE
 
-``NANOSTRAIN_PER_RAD_METRE`` (115) is provisional: its final value is fixed
-before the release that publishes the option.
+``NANOSTRAIN_PER_RAD_METRE`` = 110.37 nm/m per rad/m, from
+``ΔΦ = 2β(n + Cε)·ε·L`` at λ = 1550.12 nm and n = 1.46.
 
 The legacy SDK is preserved verbatim::
 

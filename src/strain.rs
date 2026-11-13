@@ -38,10 +38,14 @@ use std::sync::OnceLock;
 /// nm/m of strain per rad/m of phase over the gauge:
 /// `strain_nm_per_m = phase_rad / gauge_length_m × NANOSTRAIN_PER_RAD_METRE`.
 ///
-/// **PROVISIONAL.** This value (115) is an approximation; the final constant
-/// must be fixed here before the PyPI release, and it stays a fixed constant
-/// of the SDK (not a parameter a caller can change).
-pub const NANOSTRAIN_PER_RAD_METRE: f64 = 115.0;
+/// From the DAS phase-to-strain relation `ΔΦ = 2β(n + Cε)·ε·L`, with
+/// `β = 2π/λ`, `λ` the optical wavelength, `n` the refractive index of the
+/// fibre core, `Cε` the photo-elastic coefficient and `L` the gauge length:
+/// `ε = ΔΦ / (2β(n + Cε)·L)`, so the constant is `λ / (4π(n + Cε))`, in nm
+/// per rad. At λ = 1550.12 nm and n = 1.46 it is 110.37 nm/m per rad/m
+/// (n + Cε ≈ 1.1177). It is a fixed constant of the SDK, not a parameter a
+/// caller can change.
+pub const NANOSTRAIN_PER_RAD_METRE: f64 = 110.37;
 
 /// Samples below which the Python binding keeps the GIL: releasing it costs
 /// more than converting a line.
@@ -362,10 +366,10 @@ mod tests {
 
     #[test]
     fn the_factor_is_computed_once_in_f64_then_rounded_once() {
-        assert_eq!(NANOSTRAIN_PER_RAD_METRE, 115.0);
-        assert_eq!(factor_f64(10.0), Some(11.5));
-        assert_eq!(factor_f32(9.6), Some((115.0f64 / 9.6) as f32));
-        assert_eq!(factor_f32(1.6), Some((115.0f64 / 1.6) as f32));
+        assert_eq!(NANOSTRAIN_PER_RAD_METRE, 110.37);
+        assert_eq!(factor_f64(10.0), Some(110.37 / 10.0));
+        assert_eq!(factor_f32(9.6), Some((110.37f64 / 9.6) as f32));
+        assert_eq!(factor_f32(1.6), Some((110.37f64 / 1.6) as f32));
         for g in [0.0, -1.0, f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
             assert_eq!(factor_f64(g), None, "{g}");
             assert_eq!(factor_f32(g), None, "{g}");

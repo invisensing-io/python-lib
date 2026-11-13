@@ -43,8 +43,9 @@ Reads the gauge length a producer applied to a phase (recorded since
 - Refused at open with a `ValueError` naming the content type: a file that
   holds no phase, and a phase that does not record its gauge length. No
   gauge length is ever assumed.
-- **`NANOSTRAIN_PER_RAD_METRE`** = 115 nm/m per rad/m — **provisional**:
-  the final value is fixed before the release that publishes the option.
+- **`NANOSTRAIN_PER_RAD_METRE`** = 110.37 nm/m per rad/m, from the DAS
+  relation `ΔΦ = 2β(n + Cε)·ε·L` (β = 2π/λ) at λ = 1550.12 nm and a core index
+  n = 1.46.
 - `File.phase_unit`, `File.nanostrain_per_rad` (the float32 factor of a
   file with a gauge), `export_dat(gauge_length_m=…)` (a phase content type
   only).

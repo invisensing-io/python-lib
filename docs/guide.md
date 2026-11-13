@@ -352,16 +352,18 @@ from invisensing import File
 
 with File("phase/2026-11-12_10-00-00.h5", phase_unit="nanostrain") as f:
     f.gauge_length_m          # 9.6 — the gauge the producer applied
-    f.nanostrain_per_rad      # float32(115 / 9.6) — the factor applied
+    f.nanostrain_per_rad      # float32(110.37 / 9.6) — the factor applied
     f.unit, f.quantity        # "nm/m", "strain"  (f.mode stays Mode.PHASE)
     strain = f.get_phase()    # float32, nm/m
 ```
 
-!!! warning "`NANOSTRAIN_PER_RAD_METRE` is provisional"
-    The constant (115 nm/m per rad/m, `invisensing.NANOSTRAIN_PER_RAD_METRE`)
-    is an approximation. Its final value is fixed before the release that
-    publishes this option on PyPI. It is a constant of the SDK, not a
-    parameter.
+!!! note "Where `NANOSTRAIN_PER_RAD_METRE` comes from"
+    The DAS phase over a gauge L relates to the strain ε by
+    `ΔΦ = 2β(n + Cε)·ε·L`, with β = 2π/λ, n the refractive index of the
+    fibre core and Cε the photo-elastic coefficient. At λ = 1550.12 nm and
+    n = 1.46 this gives 110.37 nm/m per rad/m
+    (`invisensing.NANOSTRAIN_PER_RAD_METRE`). It is a constant of the SDK,
+    not a parameter.
 
 **The gauge length** is the one the producer *applied* — the distance
 between the two ends of the differential gauge, a whole number of the
@@ -396,7 +398,7 @@ in nm/m). `export_dat()` writes the file's own samples, in radians.
 **Precision.** The factor `NANOSTRAIN_PER_RAD_METRE / gauge_length_m` is
 computed once in float64 and rounded once to float32; each phase sample
 then takes one float32 multiply by it (round to nearest even), so the
-result is exactly `phase * np.float32(115 / g)` and the dtype stays
+result is exactly `phase * np.float32(110.37 / g)` and the dtype stays
 `float32`. A float64 phase (a third-party HDF5) is converted in float64
 with the float64 factor.
 

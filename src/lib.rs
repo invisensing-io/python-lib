@@ -22,7 +22,7 @@
 //!   [`split_pair_i16_secondary`], [`split_pair_unsigned`],
 //!   [`split_pair_to_complex_i16`], [`split_pair_f32_primary`],
 //!   [`split_pair_f32_secondary`].
-//! - The phase to strain conversion ([`strain`]): the provisional constant
+//! - The phase to strain conversion ([`strain`]): the constant
 //!   `NANOSTRAIN_PER_RAD_METRE`, [`nanostrain_factor`] and the in-place
 //!   [`phase_to_nanostrain`], with AVX-512 / AVX2 kernels chosen at run time
 //!   ([`simd_level`]), bit-identical to the scalar loop.
@@ -1854,7 +1854,7 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(phase_to_nanostrain, m)?)?;
     m.add_function(wrap_pyfunction!(simd_level, m)?)?;
     m.add_function(wrap_pyfunction!(simd_levels, m)?)?;
-    // nm/m of strain per rad/m of phase over the gauge — PROVISIONAL, see
+    // nm/m of strain per rad/m of phase over the gauge (110.37), see
     // `strain::NANOSTRAIN_PER_RAD_METRE`.
     m.add("NANOSTRAIN_PER_RAD_METRE", strain::NANOSTRAIN_PER_RAD_METRE)?;
 

@@ -466,8 +466,9 @@ with File("phase/2026-11-12_10-00-00.h5", phase_unit="nanostrain") as f:
 strain [nm/m] = phase [rad] / gauge_length_m [m] × NANOSTRAIN_PER_RAD_METRE
 ```
 
-- **`NANOSTRAIN_PER_RAD_METRE` = 115 is provisional.** Its final value is
-  fixed before the release that publishes this option on PyPI; it is a
+- **`NANOSTRAIN_PER_RAD_METRE` = 110.37** nm/m per rad/m, from
+  `ΔΦ = 2β(n + Cε)·ε·L` (β = 2π/λ, n the core index, Cε the photo-elastic
+  coefficient, L the gauge length) at λ = 1550.12 nm and n = 1.46. It is a
   constant of the SDK, not a parameter.
 - **The gauge length comes from the file**: the one the producer applied
   (a whole number of positions), recorded since 2026-11 on a phase only —

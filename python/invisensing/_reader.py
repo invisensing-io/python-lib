@@ -343,8 +343,8 @@ class File:
             strain_nm_per_m = phase_rad / gauge_length_m * NANOSTRAIN_PER_RAD_METRE
 
         with the gauge length the file records (:attr:`gauge_length_m`) and
-        ``NANOSTRAIN_PER_RAD_METRE`` (115, **provisional**: the final value
-        is fixed before the release that publishes the option). The factor
+        ``NANOSTRAIN_PER_RAD_METRE`` (110.37 nm/m per rad/m, at
+        λ = 1550.12 nm and n = 1.46). The factor
         ``NANOSTRAIN_PER_RAD_METRE / gauge_length_m`` is computed once
         (:attr:`nanostrain_per_rad`) and every phase sample takes one
         multiply by it, in the native core: the dtype stays ``float32``.
