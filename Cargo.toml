@@ -2,6 +2,10 @@
 name = "invisensing-core"
 version = "1.6.0"
 edition = "2021"
+# The AVX-512 intrinsics of the strain kernels (src/strain.rs) are stable since
+# 1.89: an older rustc building the sdist (Intel Macs have no wheel) stops here
+# with this version instead of 34 "unstable feature" errors.
+rust-version = "1.89"
 description = "Native Rust core for the Invisensing Python SDK — fast DAT reader and de-interleave kernels for Audace DAS acquisitions"
 license = "MIT"
 repository = "https://github.com/invisensing-io/python-lib"
