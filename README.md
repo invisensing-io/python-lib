@@ -471,15 +471,17 @@ strain [nm/m] = phase [rad] / gauge_length_m [m] × NANOSTRAIN_PER_RAD_METRE
   coefficient, L the gauge length) at λ = 1550.12 nm and n = 1.46. It is a
   constant of the SDK, not a parameter.
 - **The gauge length comes from the file**: the one the producer applied
-  (a whole number of positions), recorded since 2026-11 on a phase only —
-  DAT header bytes 120..124, HDF5 attribute and TDMS property
+  (a whole number of positions), written on a phase only, and only by an
+  Audace release that records it — DAT header bytes 120..124, HDF5 attribute and TDMS property
   `gauge_length_m`, SEG-Y line `GAUGE LENGTH`. `File.gauge_length_m` gives
   it (`None` without one); `File.nanostrain_per_rad` the factor.
 - **Refusals** (`ValueError` at open, naming the content type): a file that
   holds no phase (raw, I/Q, arctan, amplitude, script output, variances),
-  and a phase that does not record its gauge length (recorded before
-  2026-11, a MOZART / MOZART_PLUS phase — its gauge is set by the optics —,
-  a file read from its flags). No gauge length is ever assumed.
+  and a phase that does not record its gauge length. Audace writes it
+  into a phase file only from the release that adds it, so `nanostrain`
+  and `strain_rate` need a recording made with that release or a later
+  one; a MOZART / MOZART_PLUS phase (its gauge is set by the optics) and a
+  file read from its flags carry none. No gauge length is ever assumed.
 - The factor `NANOSTRAIN_PER_RAD_METRE / gauge_length_m` is computed once
   in float64 and rounded once to float32; every phase sample then takes one
   float32 multiply by it, in place on the buffer just read, in the native

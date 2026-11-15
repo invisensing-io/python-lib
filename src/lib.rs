@@ -129,8 +129,8 @@ mod offsets {
     /// f32 LE: seconds between two lines.
     pub const TEMPORAL_STEP_S: usize = 116;
     /// f32 LE: the gauge length the producer applied to a phase, metres
-    /// (2026-11; zero = absent on every older capture and every non-phase
-    /// file). Audace-Lib `header::GAUGE_LENGTH_OFF`.
+    /// (zero = absent: every capture made before the Audace release that
+    /// writes it, every non-phase file). Audace-Lib `header::GAUGE_LENGTH_OFF`.
     pub const GAUGE_LENGTH_M: usize = 120;
 }
 
@@ -356,14 +356,14 @@ pub struct Header {
     /// 116..120, same rule); `0.0` when absent. Informative: times come from
     /// the anchor, the card's rational and the time map, never from it.
     pub temporal_step_s: f64,
-    /// The gauge length the producer applied to a phase, metres of fibre
-    /// (2026-11), as the file stores it: DAT f32 bytes 120..124, read back
+    /// The gauge length the producer applied to a phase, metres of fibre,
+    /// as the file stores it: DAT f32 bytes 120..124, read back
     /// exactly as the f64 the other formats store (HDF5 attribute and TDMS
     /// property `gauge_length_m`, SEG-Y line `GAUGE LENGTH`) — `k · 1e8 /
     /// sample_rate` when the f32 is that value rounded, for a whole `k`
     /// (Audace-Lib `exact_gauge_length_m`), so `float32(gauge_length_m)` is
-    /// the stored f32. `0.0` when absent (every file recorded before
-    /// 2026-11, every non-phase file). Kept as stored whatever the content
+    /// the stored f32. `0.0` when absent (every file recorded before the
+    /// Audace release that writes it, every non-phase file). Kept as stored whatever the content
     /// type; `File.gauge_length_m` answers it for a phase only.
     pub gauge_length_m: f64,
 }

@@ -187,8 +187,12 @@ def test_a_phase_without_its_gauge_is_refused(tmp_path, suffix):
     if suffix in _LIBS:
         pytest.importorskip(_LIBS[suffix])
     path = WRITERS[suffix](tmp_path / f"p{suffix}", phase_samples(2, 6), PHASE, None)
-    with pytest.raises(ValueError, match="does not record its gauge length"):
+    with pytest.raises(ValueError, match="does not record its gauge length") as e:
         File(path, phase_unit="nanostrain")
+    # What is true of every file without it, with no date: the producers
+    # write it only from the Audace release that adds it.
+    assert "only from the release that adds it" in str(e.value)
+    assert "2026" not in str(e.value).replace(str(path), "")
 
 
 def test_a_mozart_or_a_legacy_phase_is_refused(tmp_path):

@@ -367,8 +367,9 @@ with File("phase/2026-11-12_10-00-00.h5", phase_unit="nanostrain") as f:
 
 **The gauge length** is the one the producer *applied* — the distance
 between the two ends of the differential gauge, a whole number of the
-stream's positions — never the length the configuration asked for. It is
-recorded since 2026-11, on a phase only: DAT header bytes 120..124
+stream's positions — never the length the configuration asked for. Audace
+writes it on a phase only, and only from the release that adds it: DAT
+header bytes 120..124
 (float32), HDF5 root attribute and TDMS property `gauge_length_m`
 (float64), SEG-Y textual line `GAUGE LENGTH: <m> METRES`. A DAT's float32
 is read back as the float64 the other formats store, so the DAT and the
@@ -380,10 +381,12 @@ HDF5 of one recording give the same strain to the bit.
 
 - the file holds no phase — raw samples, I/Q, the card's arctan,
   amplitudes, a script's output, zone variances;
-- the phase does not record its gauge length — every file recorded before
-  2026-11, a MOZART / MOZART_PLUS phase (its gauge is set by the optics,
-  not by software), a file read from its flags (content type 0). No gauge
-  length is ever assumed: read such a file in radians.
+- the phase does not record its gauge length — every recording made
+  before the Audace release that writes it (strain and strain rate need a
+  recording made with that release or a later one), a MOZART / MOZART_PLUS
+  phase (its gauge is set by the optics, not by software), a file read
+  from its flags (content type 0). No gauge length is ever assumed: read
+  such a file in radians.
 
 **What is converted.** Every read path: `read_lines`, `read_all`,
 iteration, `get_phase`, `channels`, the legacy `get_lines`. A buffer you
@@ -546,7 +549,8 @@ dataset named `acoustic_data`, typed by the content type (`int16`,
 `uint16`, `float32`; on older files by `bytes_per_sample` and the `FLOAT`
 attribute). Every header field is mirrored as a scalar attribute — with
 data format v1 also `format_version`, `card`, `duration_s` and the steps
-in f64, and since 2026-11 `gauge_length_m` on a phase with a known gauge. Lines are read slice by slice: a multi-GB capture never has to fit
+in f64, and `gauge_length_m` on a phase with a known gauge (from the
+Audace release that writes it). Lines are read slice by slice: a multi-GB capture never has to fit
 in RAM.
 
 Recordings written with the FileWriter's `compression = ZSTD` store the

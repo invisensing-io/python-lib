@@ -6,9 +6,11 @@ see differently, then what is new.
 
 ## 1.6.0
 
-Reads the gauge length a producer applied to a phase (recorded since
-2026-11), and can read a phase as strain, in nm/m, or as strain rate, in
-nm/m/s.
+Reads the gauge length a producer applied to a phase, and can read a
+phase as strain, in nm/m, or as strain rate, in nm/m/s. Audace writes the
+gauge length into a phase file only from the release that adds it: strain
+and strain rate need a recording made with that release or a later one,
+and refuse every earlier recording.
 
 ### Changed — behaviour that differs from 1.5.0
 
@@ -30,8 +32,8 @@ nm/m/s.
 - **`File.gauge_length_m`**: the gauge length the producer applied to the
   phase, in metres — DAT header bytes 120..124, HDF5 attribute and TDMS
   property `gauge_length_m`, SEG-Y line `GAUGE LENGTH` — or `None` (every
-  file recorded before 2026-11, a MOZART / MOZART_PLUS phase, a non-phase
-  file, a file read from its flags).
+  recording made before the Audace release that writes it, a MOZART /
+  MOZART_PLUS phase, a non-phase file, a file read from its flags).
 - **`File(path, phase_unit="nanostrain")`**: the phase is read as strain,
   in nm/m, `phase_rad / gauge_length_m * NANOSTRAIN_PER_RAD_METRE`, by every
   read path (`read_lines`, `read_all`, iteration, `get_phase`, `channels`,

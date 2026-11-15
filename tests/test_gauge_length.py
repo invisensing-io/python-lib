@@ -1,5 +1,5 @@
 """
-The gauge length a producer applied to a phase (2026-11): DAT header bytes
+The gauge length a producer applied to a phase: DAT header bytes
 120..124, HDF5 attribute and TDMS property ``gauge_length_m``, SEG-Y line
 ``GAUGE LENGTH`` (Audace-Lib DATA_FORMAT.md §3.4).
 

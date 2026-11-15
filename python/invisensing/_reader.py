@@ -1069,9 +1069,10 @@ class File:
         the configuration asked for — or ``None`` when the file does not
         record one.
 
-        Recorded since 2026-11 on a phase only (DAT header bytes 120..124,
-        HDF5 attribute and TDMS property ``gauge_length_m``, SEG-Y line
-        ``GAUGE LENGTH``). ``None`` for every file recorded before, for a
+        Audace writes it on a phase only (DAT header bytes 120..124, HDF5
+        attribute and TDMS property ``gauge_length_m``, SEG-Y line
+        ``GAUGE LENGTH``), and only from the release that adds it.
+        ``None`` for every recording made before that release, for a
         MOZART / MOZART_PLUS phase (its gauge is set by the optics, not by
         software), for every non-phase file (raw, I/Q, arctan, amplitude,
         variances: no gauge, whatever the header bytes hold) and for a file
@@ -1787,10 +1788,12 @@ class File:
                 f"{self._path}: phase_unit={phase_unit!r} needs the gauge length the phase "
                 f"was measured over, and this file ({self.content_type_name!r}, content "
                 f"type {self.content_type}) does not record its gauge length "
-                "(gauge_length_m is absent: a recording made before 2026-11, a MOZART or "
-                "MOZART_PLUS phase whose gauge is set by the optics, or a file converted "
-                "without it). No gauge length is assumed: read it in radians "
-                "(phase_unit='rad')."
+                "(gauge_length_m is absent). Audace writes the gauge length into a phase "
+                "file only from the release that adds it, so phase_unit='nanostrain' and "
+                "'strain_rate' need a recording made with that release or a later one; a "
+                "MOZART or MOZART_PLUS phase (its gauge is set by the optics) and a file "
+                "converted without it carry none. No gauge length is assumed: read it in "
+                "radians (phase_unit='rad')."
             )
         nanostrain_factor(gauge)  # a gauge that gives no finite factor raises here
         return gauge

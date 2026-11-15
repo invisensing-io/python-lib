@@ -545,7 +545,7 @@ class _Hdf5Backend:
             duration_s=_int_attr(attrs, "duration_s", 0, _U32_MAX),
             spatial_step_m=_step(_positive_float_attr(attrs, "spatial_step_m")),
             temporal_step_s=_step(_positive_float_attr(attrs, "temporal_step_s")),
-            # The gauge length the producer applied (2026-11), f64: written
+            # The gauge length the producer applied, f64: written
             # on a phase file with a known gauge only, absent otherwise.
             gauge_length_m=_step(_positive_float_attr(attrs, "gauge_length_m")),
         )
@@ -695,7 +695,7 @@ class _TdmsBackend:
             duration_s=_int_attr(props, "duration_s", 0, _U32_MAX),
             spatial_step_m=_step(_positive_float_attr(props, "spatial_step_m")),
             temporal_step_s=_step(_positive_float_attr(props, "temporal_step_s")),
-            # The gauge length the producer applied (2026-11, phase only).
+            # The gauge length the producer applied (phase only).
             gauge_length_m=_step(_positive_float_attr(props, "gauge_length_m")),
         )
         # The writer's tag, which names a value this SDK does not know.
@@ -978,7 +978,7 @@ class _SegyBackend:
             duration_s=u32("DURATION"),
             spatial_step_m=step("SAMPLE SPACING ALONG THE FIBER"),
             temporal_step_s=step("TRACE SPACING IN TIME"),
-            # `C25 GAUGE LENGTH: <m> METRES` (2026-11, phase only, no line
+            # `C25 GAUGE LENGTH: <m> METRES` (phase only, no line
             # when absent).
             gauge_length_m=step("GAUGE LENGTH"),
         )
