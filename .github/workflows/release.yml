@@ -73,9 +73,13 @@ jobs:
   # a Rust toolchain). Add x86_64 back in a follow-up release if there
   # is real demand. Apple Silicon (arm64) ships normally — that's the
   # vast majority of current Mac users.
+  #
+  # `macos-14` is retired: since November 2026 GitHub refuses it ("The
+  # configuration 'macos-14-arm64-us-default' is not supported") and the
+  # job is cancelled before its first step, which skips the publish job.
   build-macos:
     name: wheels · macos · ${{ matrix.target }} · py${{ matrix.python }}
-    runs-on: macos-14
+    runs-on: macos-15
     strategy:
       fail-fast: false
       matrix:
