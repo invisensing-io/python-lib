@@ -705,22 +705,22 @@ kernels — so a future refactor can't silently re-introduce the
 
 ## Examples
 
-See [`assets/basic_usage.py`](assets/basic_usage.py) for a runnable
+See [`assets/basic_usage.py`](https://github.com/invisensing-io/python-lib/blob/master/assets/basic_usage.py) for a runnable
 end-to-end script.
 
 ## Building from source
 
 ```bash
-git clone <repo>
+git clone https://github.com/invisensing-io/python-lib.git
 cd python-lib
 pip install maturin
 maturin develop --release        # local dev install
 maturin build  --release         # build a wheel for distribution
 ```
 
-The Rust crate lives in [`src/lib.rs`](src/lib.rs) and the Python
-facade in [`python/invisensing/`](python/invisensing/).
+The Rust crate lives in [`src/lib.rs`](https://github.com/invisensing-io/python-lib/blob/master/src/lib.rs) and the Python
+facade in [`python/invisensing/`](https://github.com/invisensing-io/python-lib/tree/master/python/invisensing).
 
 ## License
 
-MIT — © 2024-2026 Invisensing. See [LICENSE](LICENSE) for the full text.
+MIT — © 2024-2026 Invisensing. See [LICENSE](https://github.com/invisensing-io/python-lib/blob/master/LICENSE) for the full text.
