@@ -24,7 +24,10 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        python: ["3.9", "3.10", "3.11", "3.12", "3.13", "3.14"]
+        # No 3.9 here: `ubuntu-latest` is Ubuntu 26.04 since 2026-10-19 and
+        # actions/setup-python has no 3.9 build for it. The cp39 wheels are
+        # still built and published by release.yml (manylinux container).
+        python: ["3.10", "3.11", "3.12", "3.13", "3.14"]
     steps:
       - uses: actions/checkout@v4
 
