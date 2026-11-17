@@ -428,6 +428,43 @@ class _TimeAxis:
         return self.correction == CORRECTION_CARDCLOCK_V1 and bool(self.lines)
 
 
+def _analog_trigger(attrs):
+    """The analog-trigger record of an HDF5 file (``recording_mode`` =
+    ``"analog_trigger"``), or ``None`` for any other file."""
+    if _str_attr(attrs, "recording_mode") != "analog_trigger":
+        return None
+    from ._analog import AnalogTrigger
+
+    def i(name):
+        return _opt_int_attr(attrs, "analog_trigger_" + name)
+
+    def f(name):
+        return _float_attr(attrs, "analog_trigger_" + name)
+
+    return AnalogTrigger(
+        option=_str_attr(attrs, "analog_trigger_option") or "",
+        threshold_mv=f("threshold_mv") or 0.0,
+        threshold_counts=i("threshold_counts"),
+        full_scale_mv=f("full_scale_mv"),
+        full_scale_counts=i("full_scale_counts"),
+        offset_ns=i("offset_ns") or 0,
+        hold_ms=i("hold_ms"),
+        event=i("event"),
+        part=i("part"),
+        line=i("line"),
+        sample=i("sample"),
+        sample_offset_ns=f("sample_offset_ns"),
+        time_ns=i("time_ns"),
+        peak_mv=f("peak_mv"),
+        start_line=i("start_line"),
+        pre_lines=i("pre_lines"),
+        pre_truncated=_str_attr(attrs, "analog_trigger_pre_truncated") or "",
+        crossings_ignored=i("crossings_ignored"),
+        end_line=i("end_line"),
+        end_reason=_str_attr(attrs, "analog_trigger_end_reason"),
+    )
+
+
 def _hdf5_compression(filters: set, quantization_step_rad: Optional[float]) -> str:
     """The FileWriter ``compression`` setting an HDF5 was written with, from
     its dataset's filter pipeline: ``"NONE"`` (no filter), ``"ZSTD"`` (zstd,
@@ -575,6 +612,13 @@ class _Hdf5Backend:
             attrs, "quantization_max_error_rad"
         )
         self.compression = _hdf5_compression(filters, self.quantization_step_rad)
+        # Sub-second and analog-trigger files (Audace-Lib DATA_FORMAT.md
+        # §8.3): the card line of the file's first line and the exact
+        # duration of its lines (`duration_s` floors to whole seconds and
+        # reads 0 below one). Absent on every other file.
+        self.first_line = _opt_int_attr(attrs, "first_line")
+        self.duration_exact_s = _positive_float_attr(attrs, "duration_exact_s")
+        self.analog_trigger = _analog_trigger(attrs)
 
     def _require_open(self):
         dataset = getattr(self, "_dataset", None)

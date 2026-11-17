@@ -15,6 +15,10 @@ Every metre this SDK reports follows the file's speed. A recording made
 before the field carries none and was acquired at 2·10⁸ m/s (index
 1.49896229): it reads exactly as with 1.6.0, bit for bit.
 
+It also reads the metadata of two new kinds of recordings: files shorter
+than one second (file durations with decimals, e.g. 0.1 s) and the files of
+the analog-trigger recording mode.
+
 ### Changed — behaviour that differs from 1.6.0
 
 - **`File.distance`, `File.spatial_step_m` and `File.gauge_length_m` use
@@ -45,6 +49,9 @@ before the field carries none and was acquired at 2·10⁸ m/s (index
   replaced by `speed_of_light_m_s`, `legacy_light_speed_in_fiber_m_s`,
   `legacy_fiber_group_index`, `default_fiber_group_index`,
   `fiber_group_index_min` and `fiber_group_index_max`.
+- **`File.duration_s` reads `None` on every file shorter than one second**
+  (the header floors to whole seconds and 0 means unknown): use
+  `File.duration`, measured from the lines, or `File.duration_exact_s`.
 
 ### Added
 
@@ -74,6 +81,20 @@ before the field carries none and was acquired at 2·10⁸ m/s (index
   (200 000 000), `FIBER_GROUP_INDEX_MIN` (1) and `FIBER_GROUP_INDEX_MAX`
   (100). `Header.light_speed_m_s` and `Header.group_index` give the speed
   and the index a header's metres use.
+- `File.duration_exact_s`: the exact duration of the file's lines, from
+  the HDF5 attribute `duration_exact_s` (sub-second and analog-trigger
+  files; `None` otherwise).
+- `File.first_line`: the card-line index of the file's first line (HDF5
+  attribute `first_line`, same files).
+- `File.analog_trigger`: an `AnalogTrigger` record (option `rising_edge` or
+  `above_threshold`, threshold in mV and counts, CH2 full scale, signed
+  offset, hold, event and part numbers, trigger line, sample and time, peak,
+  start line and pre-trigger lines, why the start was truncated, ignored
+  crossings, and on the event's last file its end line and reason), read
+  from the `analog_trigger_*` attributes of a file whose `recording_mode` is
+  `analog_trigger`; `None` for any other file. `File.analog_trigger_index`
+  is the trigger line's index in the file. CH2, the trigger input, is never
+  recorded.
 
 ### Unchanged
 

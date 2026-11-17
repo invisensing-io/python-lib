@@ -119,6 +119,7 @@ from ._reader import (
     light_speed_of_group_index,
 )
 from . import content
+from ._analog import AnalogTrigger
 from . import _legacy as _legacy_impl
 
 # Kept in step with pyproject.toml and Cargo.toml by
@@ -129,6 +130,7 @@ __version__ = "1.7.0"
 __all__ = [
     "File",
     "Mode",
+    "AnalogTrigger",
     "Header",
     "DatReader",
     "parse_header",

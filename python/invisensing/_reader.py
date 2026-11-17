@@ -472,6 +472,9 @@ class File:
     _quantization_step_rad: Optional[float] = None
     _quantization_max_error_rad: Optional[float] = None
     _source_content_type: Optional[int] = None
+    _first_line: Optional[int] = None
+    _duration_exact_s: Optional[float] = None
+    _analog_trigger: Optional[Any] = None
     _trailing_bytes: int = 0
     # `phase_unit` as opened, and for "nanostrain" / "strain_rate" the gauge
     # length the phase is divided by (set at open; `None` reads the samples
@@ -565,6 +568,11 @@ class File:
             self._backend, "quantization_max_error_rad", None
         )
         self._source_content_type = getattr(self._backend, "source_content_type", None)
+        # Sub-second and analog-trigger HDF5 files: first card line, exact
+        # duration, and what triggered the recording.
+        self._first_line = getattr(self._backend, "first_line", None)
+        self._duration_exact_s = getattr(self._backend, "duration_exact_s", None)
+        self._analog_trigger = getattr(self._backend, "analog_trigger", None)
         self._trailing_bytes = int(getattr(self._backend, "trailing_bytes", 0) or 0)
         if phase_unit != "rad":
             try:
@@ -1045,8 +1053,50 @@ class File:
         seconds rounded down — or ``None`` when the file does not say (a
         file written before data format v1, one cut short by a crash, one
         under a second). :attr:`duration` is the duration measured from the
-        lines, to the nanosecond."""
+        lines, to the nanosecond.
+
+        A file shorter than one second — the sub-second file durations
+        (0.1 s), analog-trigger files — always reads ``None`` here: use
+        :attr:`duration` (or, on HDF5, :attr:`duration_exact_s`)."""
         return self._header.duration_s or None
+
+    @property
+    def duration_exact_s(self) -> Optional[float]:
+        """The exact duration of the file's lines in seconds (lines × the
+        real line period), as the writer recorded it: HDF5 files of a
+        sub-second file duration and of the analog-trigger mode only;
+        ``None`` for every other file (:attr:`duration` measures it from the
+        lines on any file)."""
+        return self._duration_exact_s
+
+    @property
+    def first_line(self) -> Optional[int]:
+        """The card-line index of the file's first line (HDF5 files of a
+        sub-second file duration and of the analog-trigger mode), or
+        ``None`` when the file does not record it."""
+        return self._first_line
+
+    @property
+    def analog_trigger(self):
+        """What triggered an analog-trigger recording
+        (:class:`~invisensing.AnalogTrigger`: option, threshold, offset,
+        hold, trigger line, sample and time, event and part, how the event
+        ended on its last file), or ``None`` for a file of any other mode.
+        HDF5 only: the mode writes nothing else. CH2, the trigger input, is
+        never in the file."""
+        return self._analog_trigger
+
+    @property
+    def analog_trigger_index(self) -> Optional[int]:
+        """The index of the trigger line in this file (``analog_trigger.line
+        − first_line``), or ``None`` when the file does not say. It may lie
+        outside ``[0, num_lines)``: a negative index is a trigger before
+        this file (a later part of a long event, a positive offset), one
+        past the end a file of pre-trigger only."""
+        at = self._analog_trigger
+        if at is None or at.line is None or self._first_line is None:
+            return None
+        return at.line - self._first_line
 
     @property
     def spatial_step_m(self) -> Optional[float]:
