@@ -75,6 +75,13 @@ use std::sync::OnceLock;
 /// per rad. At λ = 1550.12 nm and n = 1.46 it is 110.37 nm/m per rad/m
 /// (n + Cε ≈ 1.1177). It is a fixed constant of the SDK, not a parameter a
 /// caller can change.
+///
+/// Its `n` is the core's PHASE (effective) index together with the
+/// photo-elastic term, not the GROUP index that turns time of flight into
+/// distance (a file's `fiber_group_index`, [`crate::fibre`]): it does not
+/// follow that index. A file's gauge length does (it is a distance), so the
+/// factor `NANOSTRAIN_PER_RAD_METRE / gauge_length_m` uses the gauge the
+/// file states at its own index.
 pub const NANOSTRAIN_PER_RAD_METRE: f64 = 110.37;
 
 /// Samples below which the Python binding keeps the GIL: releasing it costs

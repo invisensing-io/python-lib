@@ -4,6 +4,87 @@ Changes to the `invisensing` package, one section per version published on
 PyPI. Each section lists what a script written for the previous version may
 see differently, then what is new.
 
+## 1.7.0
+
+Reads the speed of light in the fibre a recording was acquired at. The
+Audace acquisition now takes the fibre's group index `n` as a parameter
+(default 1.4682, Corning SMF-28e+ at 1550 nm) and turns time into distance
+at `v = round(c / n)` m/s instead of the fixed 2·10⁸ m/s; it writes that
+speed into every file (Audace-Lib a288414, `docs/DATA_FORMAT.md` §3.5).
+Every metre this SDK reports follows the file's speed. A recording made
+before the field carries none and was acquired at 2·10⁸ m/s (index
+1.49896229): it reads exactly as with 1.6.0, bit for bit.
+
+### Changed — behaviour that differs from 1.6.0
+
+- **`File.distance`, `File.spatial_step_m` and `File.gauge_length_m` use
+  the file's speed**: `v / (2 · sample_rate)` per position. On a recording
+  at 1.4682 they are 2.0952 % longer than at 2·10⁸ m/s (0.408381 m per
+  position at 250 MS/s instead of 0.4 m). `Header.derived_spatial_step_m`
+  and the exact read-back of a DAT's float32 gauge (`k · v / (2 ·
+  sample_rate)`) follow it too. Files without a speed: unchanged.
+- **`Header` has two more fields**: `light_speed_in_fiber_m_s` (u32, m/s,
+  as stored; `0` when absent) and `fiber_group_index` (float, the index
+  exactly as configured when the file stores it — HDF5, TDMS, SEG-Y; `0.0`
+  otherwise). `Header(...)` takes both as keywords (defaults `0` and
+  `0.0`), `repr(header)` shows them when they are not 0, and
+  `HEADER_LAYOUT` lists the speed (bytes 124..128, u32).
+- **DAT exports write header bytes 124..128**: `File.export_dat()` and
+  `export_dat(header=…)` keep the header's speed (0, absent, for a file
+  without one). 1.6.0 always wrote 0 there.
+- **SEG-Y**: the line `FIBER GROUP INDEX: <n> (LIGHT SPEED <v> M/S)` that
+  Audace-Lib writes after the gauge is read.
+- `File` warns, once at open, when a header's bytes 124..128 hold a value
+  that is not the speed of an index from 1 to 100; its metres are then read
+  at 2·10⁸ m/s.
+- `repr(File)` names the index when the file carries a speed (or is
+  relabelled); unchanged for every other file.
+- The registry copy (`tests/assets/content_types_v1.json`) follows the
+  producer's revision 5: the header rows 120 (`gauge_length_m`) and 124
+  (`light_speed_in_fiber_m_s`), and the key `light_speed_in_fiber_m_s` is
+  replaced by `speed_of_light_m_s`, `legacy_light_speed_in_fiber_m_s`,
+  `legacy_fiber_group_index`, `default_fiber_group_index`,
+  `fiber_group_index_min` and `fiber_group_index_max`.
+
+### Added
+
+- **`File.light_speed_in_fiber_m_s`** (int, m/s) and
+  **`File.fiber_group_index`** (float): the speed every metre is labelled
+  with and its index — the exact configured index where the file stores it
+  (HDF5, TDMS, SEG-Y), else the index of the speed: 1.4682 for
+  204 190 477 m/s, the legacy 1.49896229 for 2·10⁸ m/s (and for a file
+  without a speed), `c / v` otherwise.
+- **`File(path, fiber_group_index=n)`**: labels a recording at the group
+  index `n` — typically an old recording whose fibre is known
+  (`fiber_group_index=1.4682`). Only labels change, never the samples: the
+  speed becomes `round(c / n)`, the spatial step, the gauge length and the
+  trigger pre-roll are converted to it (`Header.with_fiber_group_index`),
+  and with the gauge the strain factors; `File.header` is the relabelled
+  header, so an export carries the new speed.
+  `File.recorded_fiber_group_index` and
+  `File.recorded_light_speed_in_fiber_m_s` keep the file's own. Any number
+  from 1 to 100 is accepted; anything below 1, above 100, NaN or infinite
+  raises `ValueError`, a value that is not a number `TypeError`.
+- `export_dat(…, fiber_group_index=n)`: stamps the speed of `n` (a new
+  file's steps follow it; with `header=` the header is relabelled first).
+- `light_speed_of_group_index(n)` (`round(c / n)`, half away from zero, the
+  acquisition's derivation), `group_index_of_light_speed(v)`, and the
+  constants `SPEED_OF_LIGHT_M_S`, `DEFAULT_FIBER_GROUP_INDEX` (1.4682),
+  `LEGACY_FIBER_GROUP_INDEX` (1.49896229), `LEGACY_LIGHT_SPEED_IN_FIBER_M_S`
+  (200 000 000), `FIBER_GROUP_INDEX_MIN` (1) and `FIBER_GROUP_INDEX_MAX`
+  (100). `Header.light_speed_m_s` and `Header.group_index` give the speed
+  and the index a header's metres use.
+
+### Unchanged
+
+- `NANOSTRAIN_PER_RAD_METRE` stays 110.37: it uses the fibre core's phase
+  index (n = 1.46) and the photo-elastic term, not the group index, and does
+  not follow it. A strain still divides by the file's gauge length, which
+  is a distance and follows the file's speed.
+- The legacy `invisensing.File.Constants.LIGHT_SPEED_IN_FIBER` stays
+  200 000 000: the legacy speed, what every recording made before the field
+  was acquired at.
+
 ## 1.6.0
 
 Reads the gauge length a producer applied to a phase, and can read a

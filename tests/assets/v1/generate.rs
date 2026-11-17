@@ -12,6 +12,15 @@
 //! amplitude child of 22 drops it, and the files of every other stream have
 //! none. The pre-v1 files predate the field and carry none.
 //!
+//! The fibre group index (Audace-Lib a288414, DATA_FORMAT.md §3.5): every
+//! stream above carries no speed of light (the legacy 2·10⁸ m/s, as every
+//! recording made before the field); the `fibre/` streams are stamped at
+//! 1.4682 (the default, SMF-28 at 1550 nm) and at 1.4675 (an index the
+//! speed alone does not give back exactly) — `set_fiber_group_index` before
+//! `stamp_v1` and `set_gauge_positions`, as the producer does — and written
+//! in every format: DAT carries the speed, HDF5 and TDMS the speed and the
+//! exact index, SEG-Y its `FIBER GROUP INDEX` line.
+//!
 //! Not part of the package: it builds against an Audace-Lib checkout, as
 //! `src/main.rs` of a crate whose `Cargo.toml` holds
 //!
@@ -67,6 +76,17 @@ fn sha(bytes: &[u8]) -> String {
     s.finalize().iter().map(|b| format!("{b:02x}")).collect()
 }
 
+/// What a reader of a file of format `fmt` gets for the group index of the
+/// header `h` it was written from: the index of the speed for a DAT (which
+/// carries the speed only), the writer's exact index otherwise.
+fn read_group_index(fmt: FileFormat, h: &DataHeader) -> f64 {
+    if matches!(fmt, FileFormat::DAT) {
+        audace::fibre::group_index_of_speed(hd::light_speed_m_s(h))
+    } else {
+        hd::fiber_group_index(h)
+    }
+}
+
 fn ext(fmt: FileFormat) -> &'static str {
     match fmt {
         FileFormat::HDF5 => "h5",
@@ -118,6 +138,9 @@ impl Out {
             "temporal_step_s_f32": h.temporal_step_s,
             "gauge_length_m": hd::exact_gauge_length_m(h),
             "gauge_length_m_f32": h.gauge_length_m,
+            "light_speed_in_fiber_m_s": h.light_speed_m_s,
+            "light_speed_m_s": hd::light_speed_m_s(h),
+            "fiber_group_index": read_group_index(fmt, h),
             "card": hd::card_code(h).map(|c| c.as_code()),
             "acquisition_ns": hd::acquisition_ns(h),
             "trig_clock_hz": h.trig_clock_hz,
@@ -314,6 +337,25 @@ fn main() {
     v0dual.gauge_length_m = 0.0;
     hd::set_card_tag(&mut v0dual, &legacy_p18);
     out.write("legacy/v0_ct4_dual_card.dat", FileFormat::DAT, &v0dual, &member(&pairs22, 4, 0), json!({"mode": "phase"}));
+
+    // ── The fibre group index: a phase (19) at 250 MS/s, 24 positions of gauge ──
+    for (n, dir) in [(1.4682, "fibre/1.4682"), (1.4675, "fibre/1.4675")] {
+        let mut s = stream_header(ContentType::DuiCoherentPhase, positions as i32, 4, hf::DEMODULATED | hf::FLOAT | hf::PHASE);
+        s.sample_rate = 250_000_000;
+        s.spatial_step_m = 0.0;
+        // The producer: the index first, then the steps and the gauge, which
+        // convert with its speed; the pre-roll at that speed too.
+        hd::set_fiber_group_index(&mut s, n).unwrap();
+        s.trigger_delay = hd::trigger_delay_metres(1_224, 125_000_000, hd::light_speed_m_s(&s));
+        hd::stamp_v1(&mut s);
+        hd::set_gauge_positions(&mut s, 24);
+        let h = hd::to_file_header(&s).unwrap();
+        let data = f32_bytes((0..lines * positions).map(|k| (k as f32 * 0.37).sin() * 2.5));
+        for fmt in [FileFormat::DAT, FileFormat::HDF5, FileFormat::TDMS, FileFormat::SEGY] {
+            let rel = format!("{dir}/2026-11-03_10-00-00.{}", ext(fmt));
+            out.write(&rel, fmt, &h, &data, json!({"mode": "phase"}));
+        }
+    }
 
     let doc = json!({
         "audace_lib_commit": std::fs::read_to_string(Path::new(env!("AUDACE_LIB")).join("SNAPSHOT_COMMIT")).unwrap().trim(),

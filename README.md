@@ -13,8 +13,10 @@ content type existed (content type 0) is read from its header flags as
 
 - a single column flagged `UNSIGNED` reads as unsigned integers (`uint16`
   for 2-byte samples) instead of signed;
-- `File.distance` uses the producer's 2·10⁸ m/s in the fibre: distances
-  are 3.3 % shorter than 1.3.0's;
+- `File.distance` uses the producer's speed of light in the fibre: the
+  2·10⁸ m/s every recording made before the fibre group index existed was
+  acquired at (3.3 % shorter than 1.3.0's), the file's own speed on a newer
+  one (see *The fibre group index* below);
 - a SEG-Y file's textual header (ASCII or EBCDIC) is read, and its integer
   samples at their own width;
 - `File.dtype` is the dtype `read_lines()` returns.
@@ -269,6 +271,8 @@ with File("acquisition.dat") as f:
     f.lines_left                # remaining behind the cursor
     f.duration                  # seconds (= num_lines / trig_frequency_real_hz)
     f.distance                  # metres of fibre covered by one pulse
+    f.light_speed_in_fiber_m_s  # m/s every metre is labelled with (2e8 on old files)
+    f.fiber_group_index         # its fibre group index: 1.4682, 1.49896229 on old files
     f.range                     # ADC voltage range (V)
     f.timestamp                 # start time as the format spells it (see below)
     f.content_type_name         # what the samples are: "dui_coherent_phase", "hw_amplitude"…
@@ -446,6 +450,45 @@ in their header (all formats; `0` / absent on older files):
 The header bit `0x020`, never set by any producer, is now
 `FLAG_RESERVED`.
 
+## The fibre group index (since 1.7.0)
+
+A DAS times the round trip of a pulse; the speed of light in the fibre
+turns that time into metres. The Audace acquisition takes the fibre's
+**group index** `n` as a parameter (default **1.4682**, Corning SMF-28e+ at
+1550 nm), derives one speed `v = round(c / n)` m/s, half away from zero
+(204 190 477 m/s at 1.4682), and writes it into every file: DAT header
+bytes 124..128 (u32), HDF5 attributes and TDMS properties
+`light_speed_in_fiber_m_s` and `fiber_group_index` (the index exactly as
+configured), SEG-Y line `FIBER GROUP INDEX: n (LIGHT SPEED v M/S)`. Every
+metre this SDK reports uses the file's speed:
+
+```python
+with File("phase/2026-11-18_10-00-00.h5") as f:
+    f.light_speed_in_fiber_m_s  # 204190477
+    f.fiber_group_index         # 1.4682 (a DAT: the index of its speed)
+    f.spatial_step_m            # v / (2 · sample_rate): 0.408381 m at 250 MS/s
+    f.distance                  # positions_per_line · spatial_step_m
+    f.gauge_length_m            # the gauge the producer applied, in these metres
+```
+
+A recording made before the field carries no speed and was acquired at the
+legacy **2·10⁸ m/s** (index 1.49896229): it reads exactly as before
+(`0.4` m per position at 250 MS/s). If its fibre is known, label it at its
+index — only the labels change, never the samples:
+
+```python
+with File("phase/2026-06-01_10-00-00.dat", fiber_group_index=1.4682) as f:
+    f.distance                  # 2.0952 % longer than at 2e8 m/s
+    f.recorded_fiber_group_index  # 1.49896229: what the file says
+```
+
+The spatial step, the gauge length (and with it the strain factors) and
+the trigger pre-roll follow the given index; `f.header` is the relabelled
+header, so `f.export_dat()` writes the new speed. Any index from 1 to 100
+is accepted (`ValueError` below 1, above 100, NaN or infinite).
+`light_speed_of_group_index(n)` and `group_index_of_light_speed(v)` give
+the acquisition's own conversions.
+
 ## Phase as strain, in nm/m (since 1.6.0)
 
 A differential phase measured over a gauge of `g` metres of fibre is a
@@ -469,7 +512,9 @@ strain [nm/m] = phase [rad] / gauge_length_m [m] × NANOSTRAIN_PER_RAD_METRE
 - **`NANOSTRAIN_PER_RAD_METRE` = 110.37** nm/m per rad/m, from
   `ΔΦ = 2β(n + Cε)·ε·L` (β = 2π/λ, n the core index, Cε the photo-elastic
   coefficient, L the gauge length) at λ = 1550.12 nm and n = 1.46. It is a
-  constant of the SDK, not a parameter.
+  constant of the SDK, not a parameter. Its `n` is the core's phase index,
+  not the fibre group index the file's metres are labelled at: it does not
+  follow `fiber_group_index` (the gauge length, a distance, does).
 - **The gauge length comes from the file**: the one the producer applied
   (a whole number of positions), written on a phase only, and only by an
   Audace release that records it — DAT header bytes 120..124, HDF5 attribute and TDMS property
@@ -573,9 +618,11 @@ wire format byte-for-byte) followed by the array's raw samples. Without a
 content type the `FLOAT` flag is set automatically when
 `data.dtype.kind == 'f'`. With `header=f.header` it copies every field of
 the source, as the acquisition's conversions do: a content type of the
-registry gives a v1 file (its flags, steps, card code, and the duration of
-the lines written), anything else a legacy copy. A recording whose card
-fired at an inexact rate is refused (keep it in HDF5).
+registry gives a v1 file (its flags, steps, card code, speed of light in the
+fibre, and the duration of the lines written), anything else a legacy copy.
+`fiber_group_index=n` stamps the speed of `n` (with `header=`, the header
+is relabelled at `n` first). A recording whose card fired at an inexact
+rate is refused (keep it in HDF5).
 
 ## API stability
 

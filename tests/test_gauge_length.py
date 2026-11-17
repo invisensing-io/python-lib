@@ -4,8 +4,11 @@ The gauge length a producer applied to a phase: DAT header bytes
 ``GAUGE LENGTH`` (Audace-Lib DATA_FORMAT.md §3.4).
 
 ``Header.gauge_length_m`` is the value as stored — a DAT's f32 read back as
-the f64 the other formats store (``k · 1e8 / sample_rate`` for a whole
-``k``) — and ``File.gauge_length_m`` answers it for a phase only.
+the f64 the other formats store (``k · v / (2 · sample_rate)`` for a whole
+``k``, v the file's speed of light in the fibre: ``k · 1e8 / sample_rate``
+at the legacy 2·10⁸ m/s these files carry; ``test_fiber_group_index.py``
+covers other speeds) — and ``File.gauge_length_m`` answers it for a phase
+only.
 """
 
 from __future__ import annotations

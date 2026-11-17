@@ -12,7 +12,9 @@ an interleaved value). ``expected.json`` says what the writer put in each
 generator. The phase files carry the gauge length their producer applied
 (9.6 m), every other file none. A v1 file carries no FLOAT / UNSIGNED / INTERLEAVED flag: this
 SDK must type and classify it from the content type alone, and keep every
-field through an export (E1).
+field through an export (E1). Every file but ``fibre/`` carries no speed of
+light in the fibre (the legacy 2·10⁸ m/s); ``fibre/1.4682`` and
+``fibre/1.4675`` were stamped at those group indexes, in every format.
 """
 
 from __future__ import annotations
@@ -24,7 +26,14 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from invisensing import NANOSTRAIN_PER_RAD_METRE, File, Mode, export_dat, content
+from invisensing import (
+    NANOSTRAIN_PER_RAD_METRE,
+    File,
+    Mode,
+    content,
+    export_dat,
+    group_index_of_light_speed,
+)
 
 ASSETS = Path(__file__).resolve().parent / "assets" / "v1"
 EXPECTED = ASSETS / "expected.json"
@@ -74,6 +83,14 @@ def _check_header(f: File, e: dict, *, exported: bool = False) -> None:
     assert h.gauge_length_m == e["gauge_length_m"]
     assert np.float32(h.gauge_length_m) == np.float32(e["gauge_length_m_f32"])
     assert f.gauge_length_m == (e["gauge_length_m"] or None)
+    # The fibre: the speed as stored (0 = absent), the speed every metre is
+    # converted with, the index (a DAT, exported ones too, carries the
+    # speed only: its index is the speed's).
+    assert h.light_speed_in_fiber_m_s == e["light_speed_in_fiber_m_s"]
+    assert f.light_speed_in_fiber_m_s == e["light_speed_m_s"]
+    want_index = group_index_of_light_speed(e["light_speed_m_s"]) if exported else e["fiber_group_index"]
+    assert f.fiber_group_index == want_index
+    assert f.recorded_fiber_group_index == want_index
     if e["format"] in ("dat", "h5", "tdms") or exported:
         assert h.acquisition_ns == e["acquisition_ns"]
     if e["format"] in ("dat", "h5") or (e["format"] == "tdms" and e["trig_frequency"] * e["trig_period_ticks"] == e["trig_clock_hz"]):

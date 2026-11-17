@@ -39,7 +39,8 @@ length it was measured over (``File.gauge_length_m``)::
         strain = f.get_phase()   # phase_rad / gauge_length_m * NANOSTRAIN_PER_RAD_METRE
 
 ``NANOSTRAIN_PER_RAD_METRE`` = 110.37 nm/m per rad/m, from
-``ΔΦ = 2β(n + Cε)·ε·L`` at λ = 1550.12 nm and n = 1.46.
+``ΔΦ = 2β(n + Cε)·ε·L`` at λ = 1550.12 nm and n = 1.46 (the core's phase
+index, not the fibre group index below: it does not follow it).
 
 Or as strain rate, in nm/m/s: the strain increment from the previous line
 times the real trigger frequency (NaN on line 0 and after a gap of the
@@ -48,6 +49,17 @@ time axis)::
     with File("phase/2026-11-03_10-00-00.h5", phase_unit="strain_rate") as f:
         rate = f.get_phase()     # (phase[n] - phase[n-1]) / gauge_length_m
                                  #   * NANOSTRAIN_PER_RAD_METRE * trig_frequency_real_hz
+
+Every metre (``File.distance``, ``spatial_step_m``, ``gauge_length_m``) is
+labelled at the speed of light in the fibre the file was acquired at,
+``round(c / n)`` of the fibre group index the acquisition was configured
+with (``File.light_speed_in_fiber_m_s``, ``File.fiber_group_index``); a file
+recorded before the acquisition wrote it reads at the legacy 2·10⁸ m/s
+(index 1.49896229), as it always did. An old recording whose fibre is known
+can be labelled at its index::
+
+    with File("old/2026-06-01_10-00-00.dat", fiber_group_index=1.4682) as f:
+        f.distance             # metres along an SMF-28 fibre at 1550 nm
 
 The legacy SDK is preserved verbatim::
 
@@ -97,6 +109,14 @@ from ._reader import (
     NANOSTRAIN_PER_RAD_METRE,
     TIME_FLAG_MAP_V1,
     TIME_FLAG_CORRECTED,
+    SPEED_OF_LIGHT_M_S,
+    DEFAULT_FIBER_GROUP_INDEX,
+    LEGACY_FIBER_GROUP_INDEX,
+    LEGACY_LIGHT_SPEED_IN_FIBER_M_S,
+    FIBER_GROUP_INDEX_MIN,
+    FIBER_GROUP_INDEX_MAX,
+    group_index_of_light_speed,
+    light_speed_of_group_index,
 )
 from . import content
 from . import _legacy as _legacy_impl
@@ -104,7 +124,7 @@ from . import _legacy as _legacy_impl
 # Kept in step with pyproject.toml and Cargo.toml by
 # tests/test_version.py — on an isolated site this string is the only
 # way to tell which SDK is installed, so it must not drift again.
-__version__ = "1.6.0"
+__version__ = "1.7.0"
 
 __all__ = [
     "File",
@@ -128,6 +148,14 @@ __all__ = [
     "NANOSTRAIN_PER_RAD_METRE",
     "TIME_FLAG_MAP_V1",
     "TIME_FLAG_CORRECTED",
+    "SPEED_OF_LIGHT_M_S",
+    "DEFAULT_FIBER_GROUP_INDEX",
+    "LEGACY_FIBER_GROUP_INDEX",
+    "LEGACY_LIGHT_SPEED_IN_FIBER_M_S",
+    "FIBER_GROUP_INDEX_MIN",
+    "FIBER_GROUP_INDEX_MAX",
+    "group_index_of_light_speed",
+    "light_speed_of_group_index",
     "content",
     "__version__",
 ]

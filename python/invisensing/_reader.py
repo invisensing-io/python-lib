@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import bisect
 import math
+import numbers
 import operator
 import warnings
 from enum import Enum
@@ -66,6 +67,14 @@ from ._core import (
     NANOSTRAIN_PER_RAD_METRE,
     TIME_FLAG_MAP_V1,
     TIME_FLAG_CORRECTED,
+    SPEED_OF_LIGHT_M_S,
+    DEFAULT_FIBER_GROUP_INDEX,
+    LEGACY_FIBER_GROUP_INDEX,
+    LEGACY_LIGHT_SPEED_IN_FIBER_M_S,
+    FIBER_GROUP_INDEX_MIN,
+    FIBER_GROUP_INDEX_MAX,
+    group_index_of_light_speed,
+    light_speed_of_group_index,
     nanostrain_factor,
     phase_to_nanostrain,
     phase_to_strain_rate,
@@ -94,6 +103,14 @@ __all__ = [
     "NANOSTRAIN_PER_RAD_METRE",
     "TIME_FLAG_MAP_V1",
     "TIME_FLAG_CORRECTED",
+    "SPEED_OF_LIGHT_M_S",
+    "DEFAULT_FIBER_GROUP_INDEX",
+    "LEGACY_FIBER_GROUP_INDEX",
+    "LEGACY_LIGHT_SPEED_IN_FIBER_M_S",
+    "FIBER_GROUP_INDEX_MIN",
+    "FIBER_GROUP_INDEX_MAX",
+    "group_index_of_light_speed",
+    "light_speed_of_group_index",
 ]
 
 
@@ -122,12 +139,12 @@ _I64_MIN = -(2**63)
 _I64_MAX = 2**63 - 1
 _FS_PER_NS = 1_000_000
 
-# Speed of light in the fibre (m/s): 2·10⁸, the one value used everywhere in
-# Audace. It is the legacy C++ CardControl's ``LIGHT_SPEED_IN_FIBER``, and the
-# producer (Cardcontrol) still turns the operator's metres into the card's
-# sample count with it, so a file's distances only come back right with the
-# same value.
-_LIGHT_SPEED_IN_FIBER = 200_000_000  # m/s
+# The speed of light in the fibre is the FILE's (``Header.light_speed_m_s``):
+# the acquisition turns the operator's metres into the card's sample count at
+# ``round(c / n)`` m/s, n the configured fibre group index, and stamps that
+# speed in every header (bytes 124..128, HDF5 / TDMS attributes, SEG-Y line).
+# A file without one was acquired at the legacy 2·10⁸ m/s
+# (``LEGACY_LIGHT_SPEED_IN_FIBER_M_S``), and reads exactly as it always did.
 
 
 # ── Mode enum ───────────────────────────────────────────────────────────────
@@ -402,6 +419,23 @@ class File:
         axis (:attr:`time_gaps`: lost shots), whose increment spans more than
         one line period and is never divided by one. :attr:`unit` then says
         ``"nm/m/s"`` and :attr:`quantity` ``"strain rate"``.
+    fiber_group_index
+        ``None`` (the default): every metre is labelled at the speed of light
+        the file was acquired at (:attr:`light_speed_in_fiber_m_s`; the
+        legacy 2·10⁸ m/s for a file recorded before the acquisition wrote
+        it). A number: label the recording at this fibre group index
+        instead — typically an old recording whose fibre is known, e.g.
+        ``File(path, fiber_group_index=1.4682)`` for an SMF-28 fibre at
+        1550 nm. Only the labels change, never the samples (the card samples
+        time; the speed only says how many metres a sample is): the speed
+        becomes ``round(c / n)`` (:func:`light_speed_of_group_index`), and
+        :attr:`distance`, :attr:`spatial_step_m`, :attr:`gauge_length_m` and
+        :attr:`trigger_delay` follow it (see
+        ``Header.with_fiber_group_index``), and with the gauge the strain
+        factors (:attr:`nanostrain_per_rad`). :attr:`header` is the relabelled
+        header (an export carries the new index);
+        :attr:`recorded_fiber_group_index` keeps the file's own. Any number
+        from 1 to 100 is accepted.
 
     Raises
     ------
@@ -414,7 +448,10 @@ class File:
         or ``"strain_rate"``: if the file does not hold a phase (raw
         samples, I/Q, arctan, amplitude, variances…), or holds one without
         recording its gauge length (no gauge is ever assumed). With
-        ``"strain_rate"``: if its trigger frequency is unknown (0).
+        ``"strain_rate"``: if its trigger frequency is unknown (0). If
+        ``fiber_group_index`` is below 1, above 100 or not finite.
+    TypeError
+        If ``fiber_group_index`` is not a real number.
     ImportError
         If the chosen backend needs an optional third-party library
         (``h5py`` / ``npTDMS`` / ``segyio``) that isn't installed. The
@@ -467,12 +504,15 @@ class File:
         *,
         format: Optional[str] = None,
         phase_unit: str = "rad",
+        fiber_group_index: Optional[float] = None,
     ):
         if not isinstance(phase_unit, str) or phase_unit not in _PHASE_UNITS:
             raise ValueError(
                 "phase_unit must be 'rad' (the default), 'nanostrain' or 'strain_rate', "
                 f"got {phase_unit!r}"
             )
+        if fiber_group_index is not None:
+            fiber_group_index = _group_index_argument(fiber_group_index)
         path = Path(path)
         if not path.exists():
             raise FileNotFoundError(f"no such file: '{path}'")
@@ -500,7 +540,11 @@ class File:
         # Everything downstream (mode, dtype, shape, duration, the flag
         # predicates) is arithmetic on these two values, so it keeps
         # answering after close(); see `close()` for why that matters.
-        self._header = self._backend.header
+        self._recorded_header = self._backend.header
+        self._header = self._recorded_header
+        if fiber_group_index is not None:
+            # Labels only: the metres the header states, at the new speed.
+            self._header = self._recorded_header.with_fiber_group_index(fiber_group_index)
         self._num_lines = int(self._backend.num_lines)
         # HDF5's `trig_frequency_real_hz` attribute, kept only when it can
         # describe this file (same guard as the header's rational). Every
@@ -534,7 +578,7 @@ class File:
                 self.close()
                 raise
             self._phase_unit = phase_unit
-        _warn_about_the_header(path, self._header)
+        _warn_about_the_header(path, self._recorded_header)
         if self._trailing_bytes:
             warnings.warn(
                 f"{path}: {self._trailing_bytes} byte(s) after the last whole line "
@@ -679,7 +723,9 @@ class File:
 
     @property
     def header(self) -> Header:
-        """Parsed :class:`Header` (line_size, flags, rates, timestamp…)."""
+        """Parsed :class:`Header` (line_size, flags, rates, timestamp…) — as
+        relabelled at ``File(path, fiber_group_index=…)`` when one was given
+        (its speed, index and metres; every other field as stored)."""
         return self._header
 
     @property
@@ -1008,13 +1054,53 @@ class File:
 
         The file's own value when it carries one (data format v1; the zone
         spacing of an archive export); else derived from the sample rate,
-        ``1e8 / sample_rate`` (light at 2·10⁸ m/s in the fibre, halved for
-        the round trip) for samples that are the acquisition's own; else
-        ``None`` (a script's output, an archive export of an older file).
+        ``v / (2 · sample_rate)`` with ``v`` the speed of light in the fibre
+        (:attr:`light_speed_in_fiber_m_s`; halved for the round trip:
+        ``1e8 / sample_rate`` at the legacy 2·10⁸ m/s), for samples that are
+        the acquisition's own; else ``None`` (a script's output, an archive
+        export of an older file). 0.408381 m at 250 MS/s on an SMF-28 fibre
+        (index 1.4682), 0.4 m on a recording made before the index existed.
         """
         h = self._header
         step = h.spatial_step_m or h.derived_spatial_step_m
         return step or None
+
+    @property
+    def light_speed_in_fiber_m_s(self) -> int:
+        """The speed of light in the fibre every metre of this file is
+        labelled with, whole m/s: ``round(c / n)`` of the fibre group index
+        the acquisition was configured with (header bytes 124..128, HDF5 /
+        TDMS ``light_speed_in_fiber_m_s``, SEG-Y ``FIBER GROUP INDEX`` line) —
+        or of ``File(path, fiber_group_index=…)`` when one was given. A file
+        recorded before the acquisition wrote it reads as the legacy
+        200 000 000 m/s it was acquired at (:data:`LEGACY_LIGHT_SPEED_IN_FIBER_M_S`)."""
+        return int(self._header.light_speed_m_s)
+
+    @property
+    def fiber_group_index(self) -> float:
+        """The fibre group index the file's metres are labelled at: the index
+        exactly as configured when the file stores it (HDF5, TDMS, SEG-Y:
+        ``1.4682``, not ``c / v`` round-tripped), else the index of
+        :attr:`light_speed_in_fiber_m_s` — the legacy 1.49896229 for
+        2·10⁸ m/s (every recording made before the index existed), 1.4682
+        for 204 190 477 m/s, ``c / v`` otherwise
+        (:func:`group_index_of_light_speed`). The value given to
+        ``File(path, fiber_group_index=…)`` when one was given."""
+        return float(self._header.group_index)
+
+    @property
+    def recorded_fiber_group_index(self) -> float:
+        """The fibre group index the file itself states (as
+        :attr:`fiber_group_index` reads it without ``fiber_group_index=``):
+        what the recording was acquired at, whatever it is relabelled at."""
+        return float(self._recorded_header.group_index)
+
+    @property
+    def recorded_light_speed_in_fiber_m_s(self) -> int:
+        """The speed of light in the fibre the file itself states (as
+        :attr:`light_speed_in_fiber_m_s` reads it without
+        ``fiber_group_index=``), m/s."""
+        return int(self._recorded_header.light_speed_m_s)
 
     @property
     def temporal_step_s(self) -> Optional[float]:
@@ -1186,7 +1272,9 @@ class File:
 
     @property
     def trigger_delay(self) -> int:
-        """Trigger pre-roll in **metres of fibre**.
+        """Trigger pre-roll in **metres of fibre**, whole metres, at the
+        file's speed of light (:attr:`light_speed_in_fiber_m_s`; rescaled to
+        the nearest metre with ``File(path, fiber_group_index=…)``).
 
         ``0`` means no delay — which is also what captures written before the
         field existed report, and for them it says the same thing.
@@ -1265,17 +1353,20 @@ class File:
 
         ``positions_per_line · spatial_step_m`` when the file carries its
         spatial step (data format v1; the zone spacing of an archive
-        export); otherwise ``positions_per_line · c / (2 · sample_rate)``
-        with ``c = 2·10⁸ m/s``: a sample spans ``1 / sample_rate`` of the
-        pulse's round trip, hence the 2 — the result is the distance along
-        the fibre, not the path the light travels. Both give the same
-        length for the acquisition's own samples.
+        export); otherwise ``positions_per_line · v / (2 · sample_rate)``
+        with ``v`` the speed of light in the fibre
+        (:attr:`light_speed_in_fiber_m_s`: the file's, 2·10⁸ m/s on a
+        recording made before the acquisition wrote it): a sample spans
+        ``1 / sample_rate`` of the pulse's round trip, hence the 2 — the
+        result is the distance along the fibre, not the path the light
+        travels. Both give the same length for the acquisition's own samples.
         """
         positions = max(self.positions_per_line, 1)
         step = self._header.spatial_step_m
         if step > 0 and step != self._header.derived_spatial_step_m:
             return positions * step
-        return (_LIGHT_SPEED_IN_FIBER * positions) / (2 * max(self.sample_rate, 1))
+        v = int(self._header.light_speed_m_s)
+        return (v * positions) / (2 * max(self.sample_rate, 1))
 
     # ── Flag predicates (properties — bool-callable for legacy compat) ──
 
@@ -1831,12 +1922,19 @@ class File:
             if self.trig_frequency_is_exact
             else f" (real {self.trig_frequency_real_hz:.4f} Hz)"
         )
+        # The fibre only when the header carries a speed (or is relabelled),
+        # so the representation of every older file is unchanged.
+        fibre = (
+            f", fiber_group_index={self.fiber_group_index!r}"
+            if self._header.light_speed_in_fiber_m_s
+            else ""
+        )
         return (
             f"File({path!r}, mode={self.mode.value}, "
             f"shape={self.shape}, sample_rate={self.sample_rate} Hz, "
             f"trig_frequency={self.trig_frequency} Hz{real}, "
             f"duration={self.duration:.2f}s, distance={self.distance:.2f}m"
-            f"{state})"
+            f"{fibre}{state})"
         )
 
 
@@ -1874,6 +1972,25 @@ def _warn_about_the_header(path: Path, h: Header) -> None:
             "knows are read. Upgrade invisensing.",
             stacklevel=3,
         )
+    if h.light_speed_in_fiber_m_s not in (0, h.light_speed_m_s):
+        warnings.warn(
+            f"{path}: the header's speed of light in the fibre, "
+            f"{h.light_speed_in_fiber_m_s} m/s, is not the speed of a fibre group "
+            f"index from {FIBER_GROUP_INDEX_MIN:g} to {FIBER_GROUP_INDEX_MAX:g}: "
+            f"its metres are read at the legacy {h.light_speed_m_s} m/s",
+            stacklevel=3,
+        )
+
+
+def _group_index_argument(n) -> float:
+    """``File(fiber_group_index=…)`` / ``export_dat(fiber_group_index=…)``: the
+    index as a float, or the error that says why it is refused — any real
+    number from 1 to 100 is accepted, nothing else is refused."""
+    if isinstance(n, bool) or not isinstance(n, numbers.Real):
+        raise TypeError(f"fiber_group_index must be a number, got {n!r}")
+    n = float(n)
+    light_speed_of_group_index(n)  # ValueError below 1, above 100, not finite
+    return n
 
 
 def _join_members(h: Header, field: str, *, phase_unit: str = "rad") -> Optional[str]:
@@ -2277,6 +2394,7 @@ def export_dat(
     card: Optional[str] = None,
     acquisition_ns: Optional[int] = None,
     gauge_length_m: Optional[float] = None,
+    fiber_group_index: Optional[float] = None,
 ) -> None:
     """
     Write a 2-D numpy array out as an Audace ``.dat`` file (128-byte
@@ -2346,20 +2464,32 @@ def export_dat(
         source's first (``f.line_time_ns(start)``).
     gauge_length_m
         The gauge length the phase was measured over, metres (header bytes
-        120..124, stored as float32): a phase content type only.
+        120..124, stored as float32): a phase content type only. With
+        ``fiber_group_index``, metres at that index.
+    fiber_group_index
+        The fibre group index the samples' metres are labelled at: the file
+        carries its speed of light ``round(c / n)`` (header bytes 124..128;
+        a DAT stores the speed, not the index). Without ``header``, the
+        steps the file states follow it. With ``header``, the header is
+        relabelled at it first, exactly as ``File(path,
+        fiber_group_index=n)`` does (its step, gauge and trigger pre-roll
+        converted to the new speed), then the other keywords apply. Without
+        it, the header's speed is kept (none: the legacy 2·10⁸ m/s).
 
     Raises
     ------
     ValueError
         If ``data`` is not 2-D, if a required field is missing, if the
-        data is not of the content type's sample type, or if
+        data is not of the content type's sample type, if
         ``gauge_length_m`` is given for a content type that is not a phase
-        or is not a length.
+        or is not a length, or if ``fiber_group_index`` is below 1, above
+        100 or not finite.
     OSError
         If the write fails.
     """
     if data.ndim != 2:
         raise ValueError(f"data must be 2-D (rows × line_size), got {data.ndim}-D")
+    index = None if fiber_group_index is None else _group_index_argument(fiber_group_index)
 
     def as_int(value):
         # As 1.3.0 did: ``int(...)`` takes ``250e6``, numpy scalars and
@@ -2404,11 +2534,20 @@ def export_dat(
                 f"but the data is {data.dtype}"
             )
         defaults = dict(range=0, timestamp="", flags=0, pulse_width=0, num_channels=1)
+        if index is not None:
+            # Nothing to relabel: every metre given is at this index.
+            defaults.update(
+                light_speed_in_fiber_m_s=light_speed_of_group_index(index),
+                fiber_group_index=index,
+            )
         header = Header(
             line_size=int(data.shape[1]),
             sample_size=int(data.dtype.itemsize),
             **{**defaults, **overrides},
         )
-    elif overrides:
-        header = _formats.replace_header(header, **overrides)
+    else:
+        if index is not None:
+            header = header.with_fiber_group_index(index)
+        if overrides:
+            header = _formats.replace_header(header, **overrides)
     _write_dat(path, _file_header(header, data.dtype, data.shape[1], data.shape[0]), [data])

@@ -11,6 +11,7 @@ Skipped automatically when the optional backend isn't installed.
 
 from __future__ import annotations
 
+import os
 import re
 import tempfile
 from pathlib import Path
@@ -401,9 +402,10 @@ def test_an_unrecognised_text_encoding_is_read_as_ascii_with_a_warning():
 
 # ── The v1 fixture above, checked against the writer that produces it ─────
 
+#: Audace-Lib's SEG-Y writer: Audace-Lib checked out beside python-lib, or
+#: where the `AUDACE_LIB` environment variable says.
 _AUDACE_LIB_SEGY_SOURCE = (
-    Path(__file__).resolve().parent.parent.parent
-    / "Audace-Lib"
+    Path(os.environ.get("AUDACE_LIB") or Path(__file__).resolve().parent.parent.parent / "Audace-Lib")
     / "src"
     / "formats"
     / "segy.rs"

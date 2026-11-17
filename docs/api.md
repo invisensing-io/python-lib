@@ -81,6 +81,14 @@ raw cursor (rare).
 
 ::: invisensing.export_dat
 
+### `light_speed_of_group_index`
+
+::: invisensing.light_speed_of_group_index
+
+### `group_index_of_light_speed`
+
+::: invisensing.group_index_of_light_speed
+
 ---
 
 ## content
@@ -127,7 +135,7 @@ trig_frequency_real_hz`, NaN on line 0 and after a gap of the time axis
 
 | Constant | Value | Meaning |
 |---|---|---|
-| `NANOSTRAIN_PER_RAD_METRE` | `110.37` | nm/m of strain per rad/m of phase over the gauge, from `ΔΦ = 2β(n + Cε)·ε·L` at λ = 1550.12 nm and n = 1.46 |
+| `NANOSTRAIN_PER_RAD_METRE` | `110.37` | nm/m of strain per rad/m of phase over the gauge, from `ΔΦ = 2β(n + Cε)·ε·L` at λ = 1550.12 nm and n = 1.46 (the core's phase index: it does not follow the fibre group index below) |
 
 The native core underneath (`invisensing._core`, not part of the stable
 API): `nanostrain_factor(gauge_length_m)` (the float32 factor),
@@ -141,6 +149,23 @@ gauge_length_m, trig_frequency_hz)` (the float32 factor) and
 *, interleaved=False, simd=None)` (in place on whole lines; `previous` holds
 the line before the block on entry — NaN for none — and the block's last
 line as stored on return).
+
+## Fibre group index constants
+
+Every metre of a file is labelled at the speed of light in the fibre it
+was acquired at, `round(c / n)` of the fibre group index `n`
+(`File.light_speed_in_fiber_m_s`, `File.fiber_group_index`;
+`File(path, fiber_group_index=n)` relabels; see the
+[Guide](guide.md#the-fibre-group-index-since-170)).
+
+| Constant | Value | Meaning |
+|---|---|---|
+| `SPEED_OF_LIGHT_M_S` | `299792458` | Speed of light in vacuum, m/s (exact) |
+| `DEFAULT_FIBER_GROUP_INDEX` | `1.4682` | The acquisition's default index: Corning SMF-28e+ at 1550 nm (204 190 477 m/s) |
+| `LEGACY_FIBER_GROUP_INDEX` | `1.49896229` | `c / 2·10⁸`: the index of every recording made before the field |
+| `LEGACY_LIGHT_SPEED_IN_FIBER_M_S` | `200000000` | The speed a file without one was acquired at, m/s |
+| `FIBER_GROUP_INDEX_MIN` | `1.0` | Lowest accepted index (inclusive) |
+| `FIBER_GROUP_INDEX_MAX` | `100.0` | Highest accepted index (inclusive) |
 
 ## Time-flag constants
 

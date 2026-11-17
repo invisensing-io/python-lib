@@ -64,6 +64,7 @@ HEADER_FIELDS = (
     "acquisition_ns", "trigger_delay", "trig_clock_hz", "trig_period_ticks",
     "line_offset", "time_flags", "card", "duration_s", "format_version",
     "spatial_step_m", "temporal_step_s", "gauge_length_m",
+    "light_speed_in_fiber_m_s", "fiber_group_index",
 )
 
 
@@ -548,6 +549,11 @@ class _Hdf5Backend:
             # The gauge length the producer applied, f64: written
             # on a phase file with a known gauge only, absent otherwise.
             gauge_length_m=_step(_positive_float_attr(attrs, "gauge_length_m")),
+            # The fibre (since 2026-11-17): the speed of light every metre of
+            # the file was converted with (u32) and the group index exactly
+            # as configured (f64). Absent: 0, the legacy 2·10⁸ m/s.
+            light_speed_in_fiber_m_s=_int_attr(attrs, "light_speed_in_fiber_m_s", 0, _U32_MAX),
+            fiber_group_index=_step(_positive_float_attr(attrs, "fiber_group_index")),
         )
         # `clock / ticks` as a float, for MATLAB / HDFView users. Normally
         # redundant with the rational above (same writer, same value); kept
@@ -697,6 +703,9 @@ class _TdmsBackend:
             temporal_step_s=_step(_positive_float_attr(props, "temporal_step_s")),
             # The gauge length the producer applied (phase only).
             gauge_length_m=_step(_positive_float_attr(props, "gauge_length_m")),
+            # The fibre, as HDF5's attributes (absent: the legacy speed).
+            light_speed_in_fiber_m_s=_int_attr(props, "light_speed_in_fiber_m_s", 0, _U32_MAX),
+            fiber_group_index=_step(_positive_float_attr(props, "fiber_group_index")),
         )
         # The writer's tag, which names a value this SDK does not know.
         self.content_type_name_attr = _str_attr(props, "content_type_name")
@@ -886,6 +895,24 @@ def _segy_content_type(value: Optional[str]) -> int:
     return _CONTENT_TYPE_BY_NAME.get(tag, 0)
 
 
+def _segy_fibre(value: Optional[str]) -> tuple:
+    """``(light_speed_in_fiber_m_s, fiber_group_index)`` of the SEG-Y line
+    ``FIBER GROUP INDEX: <n> (LIGHT SPEED <v> M/S)`` (Audace-Lib, since
+    2026-11-17): the speed is authoritative, the index exact as written;
+    ``(0, 0.0)`` (absent: the legacy speed) without the line or for a value
+    that is not a whole number of m/s within ``u32``."""
+    if not value:
+        return 0, 0.0
+    index = _leading_float(value)
+    _, sep, rest = value.upper().partition("LIGHT SPEED")
+    speed = _leading_int(rest) if sep else None
+    if speed is None or not 0 <= speed <= _U32_MAX:
+        speed = 0
+    if index is None or not (np.isfinite(index) and index > 0):
+        index = 0.0
+    return speed, index
+
+
 class _SegyBackend:
     def __init__(self, path: Path):
         try:
@@ -960,6 +987,8 @@ class _SegyBackend:
             v = _leading_float(fields.get(key))
             return v if v is not None and np.isfinite(v) and v > 0 else 0.0
 
+        speed, index = _segy_fibre(fields.get("FIBER GROUP INDEX"))
+
         self._header = Header(
             line_size=int(samples_per_trace),
             trig_frequency=int(_leading_int(fields.get("TRIGGER FREQUENCY")) or 0),
@@ -981,6 +1010,10 @@ class _SegyBackend:
             # `C25 GAUGE LENGTH: <m> METRES` (phase only, no line
             # when absent).
             gauge_length_m=step("GAUGE LENGTH"),
+            # `Cnn FIBER GROUP INDEX: <n> (LIGHT SPEED <v> M/S)`, the line
+            # after the gauge (no line: the legacy speed).
+            light_speed_in_fiber_m_s=speed,
+            fiber_group_index=index,
         )
 
         # Traces are read lazily, one chunk per `read_lines`, via segyio's

@@ -6,6 +6,13 @@ property ``gauge_length_m`` (f64, absent when there is none), SEG-Y line
 ``C25 GAUGE LENGTH: <m> METRES``. DAT headers are built byte by byte; the
 other formats with the library their backend reads them with.
 
+The fibre (Audace-Lib a288414, DATA_FORMAT.md §3.5) on request: the speed
+of light in the fibre at DAT bytes 124..128 (u32), HDF5 attribute and TDMS
+property ``light_speed_in_fiber_m_s`` beside the exact ``fiber_group_index``
+(f64), SEG-Y line ``C26 FIBER GROUP INDEX: <n> (LIGHT SPEED <v> M/S)``; the
+steps then follow the speed. Without it (the default) the files are legacy:
+no speed, steps at 2·10⁸ m/s.
+
 Not a test module: ``test_gauge_length.py`` and ``test_nanostrain.py``
 import it.
 """
@@ -18,8 +25,11 @@ from typing import Optional
 
 import numpy as np
 
-#: 62.5 MHz: 1.6 m between positions (the p21 Phase tap at downsampling 4).
+#: 62.5 MHz: 1.6 m between positions (the p21 Phase tap at downsampling 4)
+#: at the legacy speed of light in the fibre.
 SAMPLE_RATE = 62_500_000
+#: The speed of light in the fibre of a file that does not state one, m/s.
+LEGACY_SPEED = 200_000_000
 #: Six positions of 1.6 m: the f64 `6 * 1e8 / SAMPLE_RATE` is 9.6 exactly
 #: as Python spells it, and the DAT stores `float32(9.6)`.
 GAUGE = 9.6
@@ -46,6 +56,13 @@ def phase_samples(rows: int, positions: int, seed: int = 0) -> np.ndarray:
     return data
 
 
+def pitch(sample_rate: int = SAMPLE_RATE, light_speed: int = 0) -> float:
+    """Metres between two positions, ``v / (2 · rate)`` (Audace-Lib
+    ``fibre::sample_pitch_m``) at ``light_speed`` (0: the legacy speed, the
+    f64 ``1e8 / rate``)."""
+    return (light_speed or LEGACY_SPEED) / (2 * sample_rate) if sample_rate else 0.0
+
+
 def dat_header(
     *,
     content_type: int,
@@ -55,8 +72,10 @@ def dat_header(
     gauge: float = 0.0,
     sample_rate: int = SAMPLE_RATE,
     format_version: int = 1,
+    light_speed: int = 0,
 ) -> bytes:
-    """A 128-byte DataHeader, as a producer of 2026-11 writes it."""
+    """A 128-byte DataHeader, as a producer of 2026-11 writes it (with the
+    speed of light in the fibre at bytes 124..128 when ``light_speed``)."""
     buf = bytearray(128)
     struct.pack_into("<q", buf, 0, ANCHOR_NS)
     struct.pack_into("<8i", buf, 32, line_size, TRIG, sample_size, sample_rate, flags, 1000, 100, 1)
@@ -64,8 +83,9 @@ def dat_header(
     buf[65:68] = b"p21"
     buf[108] = format_version
     if format_version:
-        struct.pack_into("<ff", buf, 112, 1e8 / sample_rate if sample_rate else 0.0, 1.0 / TRIG)
+        struct.pack_into("<ff", buf, 112, pitch(sample_rate, light_speed), 1.0 / TRIG)
     struct.pack_into("<f", buf, 120, gauge)
+    struct.pack_into("<I", buf, 124, light_speed)
     return bytes(buf)
 
 
@@ -86,6 +106,8 @@ def write_h5(
     flags: int = 0,
     sample_size: Optional[int] = None,
     extra: Optional[dict] = None,
+    light_speed: int = 0,
+    group_index: Optional[float] = None,
 ) -> Path:
     import h5py
 
@@ -108,16 +130,27 @@ def write_h5(
         a["content_type_name"] = CONTENT_TYPE_NAMES[content_type]
         a["format_version"] = 1
         a["card"] = "p21"
-        a["spatial_step_m"] = 1e8 / SAMPLE_RATE
+        a["spatial_step_m"] = pitch(SAMPLE_RATE, light_speed)
         a["temporal_step_s"] = 1.0 / TRIG
         if gauge is not None:
             a["gauge_length_m"] = np.float64(gauge)
+        if light_speed:
+            a["light_speed_in_fiber_m_s"] = np.uint32(light_speed)
+            a["fiber_group_index"] = np.float64(group_index)
         for k, v in (extra or {}).items():
             a[k] = v
     return path
 
 
-def write_tdms(path: Path, data: np.ndarray, *, content_type: int, gauge: Optional[float] = None) -> Path:
+def write_tdms(
+    path: Path,
+    data: np.ndarray,
+    *,
+    content_type: int,
+    gauge: Optional[float] = None,
+    light_speed: int = 0,
+    group_index: Optional[float] = None,
+) -> Path:
     from nptdms import ChannelObject, RootObject, TdmsWriter
 
     from invisensing._core import CONTENT_TYPE_NAMES
@@ -136,11 +169,14 @@ def write_tdms(path: Path, data: np.ndarray, *, content_type: int, gauge: Option
         "content_type_name": CONTENT_TYPE_NAMES[content_type],
         "format_version": np.int32(1),
         "card": "p21",
-        "spatial_step_m": np.float64(1e8 / SAMPLE_RATE),
+        "spatial_step_m": np.float64(pitch(SAMPLE_RATE, light_speed)),
         "temporal_step_s": np.float64(1.0 / TRIG),
     }
     if gauge is not None:
         props["gauge_length_m"] = np.float64(gauge)
+    if light_speed:
+        props["light_speed_in_fiber_m_s"] = np.uint32(light_speed)
+        props["fiber_group_index"] = np.float64(group_index)
     with TdmsWriter(str(path)) as w:
         w.write_segment([
             RootObject(properties=props),
@@ -149,7 +185,15 @@ def write_tdms(path: Path, data: np.ndarray, *, content_type: int, gauge: Option
     return path
 
 
-def segy_text_lines(*, content_type: int, positions: int, traces: int, gauge: Optional[float]) -> list:
+def segy_text_lines(
+    *,
+    content_type: int,
+    positions: int,
+    traces: int,
+    gauge: Optional[float],
+    light_speed: int = 0,
+    group_index: Optional[float] = None,
+) -> list:
     """The textual header Audace-Lib writes (`textual_header_lines`)."""
     from invisensing._core import CONTENT_TYPE_NAMES
 
@@ -167,7 +211,7 @@ def segy_text_lines(*, content_type: int, positions: int, traces: int, gauge: Op
         f"C11 FIBER POSITIONS PER TRACE: {positions}",
         "C12 FIBER OPTIC DAS DATA FORMAT:",
         "C13 - EACH TRACE IS ONE TRIGGER LINE, ITS SAMPLES RUN ALONG THE FIBER",
-        "C14 - SAMPLE SPACING ALONG THE FIBER: 1.6 METERS",
+        f"C14 - SAMPLE SPACING ALONG THE FIBER: {pitch(SAMPLE_RATE, light_speed)!r} METERS",
         "C15 - TRACE SPACING IN TIME: 0.02 S",
         f"C16 - CONTENT-TYPE: {CONTENT_TYPE_NAMES[content_type]} ({content_type})",
         "C17 - QUANTITY: phase UNIT: rad",
@@ -181,10 +225,21 @@ def segy_text_lines(*, content_type: int, positions: int, traces: int, gauge: Op
     ]
     if gauge is not None:
         lines.append(f"C25 GAUGE LENGTH: {gauge!r} METRES")
+    if light_speed:
+        n = len(lines) + 1
+        lines.append(f"C{n:>2} FIBER GROUP INDEX: {group_index!r} (LIGHT SPEED {light_speed} M/S)")
     return lines
 
 
-def write_sgy(path: Path, data: np.ndarray, *, content_type: int, gauge: Optional[float] = None) -> Path:
+def write_sgy(
+    path: Path,
+    data: np.ndarray,
+    *,
+    content_type: int,
+    gauge: Optional[float] = None,
+    light_speed: int = 0,
+    group_index: Optional[float] = None,
+) -> Path:
     import segyio
 
     spec = segyio.spec()
@@ -195,7 +250,8 @@ def write_sgy(path: Path, data: np.ndarray, *, content_type: int, gauge: Optiona
         for i in range(data.shape[0]):
             f.trace[i] = data[i]
     lines = segy_text_lines(
-        content_type=content_type, positions=data.shape[1], traces=data.shape[0], gauge=gauge
+        content_type=content_type, positions=data.shape[1], traces=data.shape[0], gauge=gauge,
+        light_speed=light_speed, group_index=group_index,
     )
     text = "".join(line.ljust(80)[:80] for line in lines).ljust(3200)[:3200]
     raw = bytearray(path.read_bytes())

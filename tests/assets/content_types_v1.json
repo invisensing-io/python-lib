@@ -1,9 +1,14 @@
 {
  "schema": 1,
- "revision": 4,
+ "revision": 5,
  "format_version": 1,
  "spec": "Audace-Lib/docs/DATA_FORMAT.md",
- "light_speed_in_fiber_m_s": 200000000,
+ "speed_of_light_m_s": 299792458,
+ "legacy_light_speed_in_fiber_m_s": 200000000,
+ "legacy_fiber_group_index": 1.49896229,
+ "default_fiber_group_index": 1.4682,
+ "fiber_group_index_min": 1.0,
+ "fiber_group_index_max": 100.0,
  "header_size": 128,
  "endianness": "little",
  "header": [
@@ -145,6 +150,20 @@
    "size": 4,
    "type": "f32",
    "name": "temporal_step_s",
+   "since": 1
+  },
+  {
+   "offset": 120,
+   "size": 4,
+   "type": "f32",
+   "name": "gauge_length_m",
+   "since": 1
+  },
+  {
+   "offset": 124,
+   "size": 4,
+   "type": "u32",
+   "name": "light_speed_in_fiber_m_s",
    "since": 1
   }
  ],

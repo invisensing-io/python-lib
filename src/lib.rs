@@ -29,6 +29,11 @@
 //!   [`strain_rate_factor`] and the in-place [`phase_to_strain_rate`]
 //!   (`(x[n] − x[n−1]) × factor`, one line carried from a block to the
 //!   next), with the same tiers and the same bit-identity.
+//! - The fibre's group index ([`fibre`]): the speed of light in the fibre a
+//!   header carries (bytes 124..128, 0 = the legacy 2·10⁸ m/s), the one
+//!   every metre of a file is converted with, and the helpers
+//!   [`light_speed_of_group_index`] and [`group_index_of_light_speed`] —
+//!   Audace-Lib's `audace::fibre` term for term.
 //!
 //! All hot kernels operate on contiguous-memory views (`as_slice`) and use
 //! `chunks_exact(2)` so LLVM can auto-vectorise the stride-2 reads. The
@@ -69,6 +74,7 @@ use std::{
 };
 
 mod content;
+mod fibre;
 mod strain;
 
 use content::SampleType;
@@ -132,6 +138,12 @@ mod offsets {
     /// (zero = absent: every capture made before the Audace release that
     /// writes it, every non-phase file). Audace-Lib `header::GAUGE_LENGTH_OFF`.
     pub const GAUGE_LENGTH_M: usize = 120;
+    /// u32 LE: the speed of light in the fibre the positions were acquired
+    /// at, whole m/s (`round(c / n)` of the configured group index `n`); 0 =
+    /// absent, read as the legacy 2·10⁸ m/s every capture made before the
+    /// field was acquired at. The last four bytes of the header. Audace-Lib
+    /// `header::LIGHT_SPEED_OFF`.
+    pub const LIGHT_SPEED_IN_FIBER_M_S: usize = 124;
 }
 
 /// The data format version this SDK reads in full.
@@ -139,9 +151,8 @@ const FORMAT_VERSION: u8 = 1;
 
 /// The header layout, as `(name, offset, size, type)`: what
 /// `tests/test_content_type.py` compares with the producer's registry
-/// (whose revision 4 predates `gauge_length_m`, Audace-Lib DATA_FORMAT.md
-/// §11: the test names it as the one field ahead of the registry).
-const HEADER_LAYOUT: [(&str, usize, usize, &str); 21] = [
+/// (revision 5, which lists every field up to byte 128).
+const HEADER_LAYOUT: [(&str, usize, usize, &str); 22] = [
     ("timestamp", offsets::TIMESTAMP, 32, "bytes"),
     ("line_size", offsets::LINE_SIZE, 4, "i32"),
     ("trig_frequency", offsets::TRIG_FREQUENCY, 4, "i32"),
@@ -163,6 +174,7 @@ const HEADER_LAYOUT: [(&str, usize, usize, &str); 21] = [
     ("spatial_step_m", offsets::SPATIAL_STEP_M, 4, "f32"),
     ("temporal_step_s", offsets::TEMPORAL_STEP_S, 4, "f32"),
     ("gauge_length_m", offsets::GAUGE_LENGTH_M, 4, "f32"),
+    ("light_speed_in_fiber_m_s", offsets::LIGHT_SPEED_IN_FIBER_M_S, 4, "u32"),
 ];
 
 /// Bits of the header's `time_flags` (bytes 100..104) — must match the
@@ -359,21 +371,42 @@ pub struct Header {
     /// The gauge length the producer applied to a phase, metres of fibre,
     /// as the file stores it: DAT f32 bytes 120..124, read back
     /// exactly as the f64 the other formats store (HDF5 attribute and TDMS
-    /// property `gauge_length_m`, SEG-Y line `GAUGE LENGTH`) — `k · 1e8 /
-    /// sample_rate` when the f32 is that value rounded, for a whole `k`
-    /// (Audace-Lib `exact_gauge_length_m`), so `float32(gauge_length_m)` is
-    /// the stored f32. `0.0` when absent (every file recorded before the
-    /// Audace release that writes it, every non-phase file). Kept as stored whatever the content
-    /// type; `File.gauge_length_m` answers it for a phase only.
+    /// property `gauge_length_m`, SEG-Y line `GAUGE LENGTH`) — `k · v / (2 ·
+    /// sample_rate)` when the f32 is that value rounded, for a whole `k` (v
+    /// the header's `light_speed_m_s`; Audace-Lib `exact_gauge_length_m`), so
+    /// `float32(gauge_length_m)` is the stored f32. `0.0` when absent (every
+    /// file recorded before the Audace release that writes it, every
+    /// non-phase file). Kept as stored whatever the content type;
+    /// `File.gauge_length_m` answers it for a phase only.
     pub gauge_length_m: f64,
+    /// The speed of light in the fibre the positions were acquired at, whole
+    /// m/s, as the file stores it: DAT bytes 124..128, HDF5 attribute and
+    /// TDMS property `light_speed_in_fiber_m_s`, SEG-Y line `FIBER GROUP
+    /// INDEX: n (LIGHT SPEED v M/S)`. `0` = absent: every file recorded
+    /// before the Audace release that writes it, acquired at the legacy
+    /// 2·10⁸ m/s. Use `light_speed_m_s` for the speed every metre is
+    /// converted with (this one when it is a speed, the legacy one
+    /// otherwise).
+    pub light_speed_in_fiber_m_s: u32,
+    /// The fibre's group index exactly as the acquisition was configured
+    /// with, as the file stores it (HDF5 attribute and TDMS property
+    /// `fiber_group_index`, SEG-Y line `FIBER GROUP INDEX`); `0.0` when the
+    /// file does not store one (a DAT carries the speed only; every file
+    /// recorded before the field). Use `group_index` for the index of the
+    /// header (this one when it gives the header's speed, else the index of
+    /// the speed).
+    pub fiber_group_index: f64,
 }
 
-/// The light speed in the fibre, halved for the round trip: one sample at
-/// `f` Hz spans `1e8 / f` metres of fibre (`audace::LIGHT_SPEED_IN_FIBER_M_S`
-/// = 2e8 m/s).
-const METRES_PER_SAMPLE_HZ: f64 = 100_000_000.0;
-
 impl Header {
+    /// The speed of light in the fibre every metre of this header is
+    /// converted with: the stored speed when it is one an accepted group
+    /// index gives, else the legacy 2·10⁸ m/s ([`fibre::effective_speed_m_s`],
+    /// Audace-Lib `header::light_speed_m_s`).
+    fn speed(&self) -> u32 {
+        fibre::effective_speed_m_s(self.light_speed_in_fiber_m_s)
+    }
+
     /// The consistent card rational, see [`consistent_rational`].
     fn rational(&self) -> Option<(u32, u32)> {
         consistent_rational(self.trig_clock_hz, self.trig_period_ticks, self.trig_frequency)
@@ -496,17 +529,18 @@ impl Header {
     }
 
     /// The steps the header's other fields give, f64 (Audace-Lib
-    /// `derived_steps`): `1e8 / sample_rate` for a value whose positions are
-    /// the producer's samples (not a script's output, not a zone variance,
-    /// not an unassigned value), the real line period from the cadence; 0
-    /// each when it cannot be derived.
+    /// `derived_steps`): `v / (2 · sample_rate)` (v the header's speed of
+    /// light in the fibre; `1e8 / sample_rate` at the legacy 2·10⁸ m/s) for a
+    /// value whose positions are the producer's samples (not a script's
+    /// output, not a zone variance, not an unassigned value), the real line
+    /// period from the cadence; 0 each when it cannot be derived.
     fn derived_steps(&self) -> (f64, f64) {
         let ct = self.content_type;
         let quantity = content::info(ct).and_then(|i| i.quantity.or(i.members.map(|m| m[0].quantity)));
         let derivable = content::info(ct).is_some()
             && !matches!(quantity, Some("custom" | "variance" | "log_variance"));
         let spatial = if derivable && self.sample_rate > 0 {
-            METRES_PER_SAMPLE_HZ / self.sample_rate as f64
+            fibre::sample_pitch_m(self.speed(), self.sample_rate as f64)
         } else {
             0.0
         };
@@ -532,17 +566,20 @@ fn exact_step(field: f32, derived: f64) -> f64 {
 }
 
 /// The gauge length a DAT stores (f32), in f64 — Audace-Lib
-/// `exact_gauge_length_m` without its phase filter: exactly `k · 1e8 /
-/// sample_rate` when the field is that value rounded to f32 for a whole
-/// `k ≥ 1`, the field otherwise; 0 when absent (0, negative, not finite).
-fn exact_gauge(field: f32, sample_rate: i32) -> f64 {
+/// `exact_gauge_length_m` without its phase filter: exactly `k · v / (2 ·
+/// sample_rate)` (v the header's speed of light in the fibre) when the
+/// field is that value rounded to f32 for a whole `k ≥ 1`, the field
+/// otherwise; 0 when absent (0, negative, not finite).
+fn exact_gauge(field: f32, sample_rate: i32, v: u32) -> f64 {
     if !(field.is_finite() && field > 0.0) {
         return 0.0;
     }
     if sample_rate > 0 {
-        let k = (f64::from(field) * sample_rate as f64 / METRES_PER_SAMPLE_HZ).round();
+        let rate = sample_rate as f64;
+        // g / pitch, written 2·g·rate / v: exactly g·rate / 10⁸ at 2·10⁸.
+        let k = (2.0 * f64::from(field) * rate / f64::from(v)).round();
         if (1.0..=1e15).contains(&k) {
-            let exact = k * METRES_PER_SAMPLE_HZ / sample_rate as f64;
+            let exact = fibre::metres_of_positions(k, v, rate);
             if exact as f32 == field {
                 return exact;
             }
@@ -595,6 +632,8 @@ impl Header {
         spatial_step_m = 0.0,
         temporal_step_s = 0.0,
         gauge_length_m = 0.0,
+        light_speed_in_fiber_m_s = 0,
+        fiber_group_index = 0.0,
     ))]
     #[allow(clippy::too_many_arguments)]
     fn new(
@@ -620,6 +659,8 @@ impl Header {
         spatial_step_m: f64,
         temporal_step_s: f64,
         gauge_length_m: f64,
+        light_speed_in_fiber_m_s: u32,
+        fiber_group_index: f64,
     ) -> PyResult<Self> {
         let finite_or_zero = |v: f64| if v.is_finite() && v > 0.0 { v } else { 0.0 };
         Ok(Self {
@@ -645,6 +686,10 @@ impl Header {
             spatial_step_m: finite_or_zero(spatial_step_m),
             temporal_step_s: finite_or_zero(temporal_step_s),
             gauge_length_m: finite_or_zero(gauge_length_m),
+            // As stored: a value no accepted index gives reads as the legacy
+            // speed (`light_speed_m_s`), like an absent one.
+            light_speed_in_fiber_m_s,
+            fiber_group_index: finite_or_zero(fiber_group_index),
         })
     }
 
@@ -887,14 +932,86 @@ impl Header {
         }
     }
 
-    /// The spatial step the header's other fields give, m: `1e8 /
-    /// sample_rate` for a content type whose positions are the producer's
-    /// samples (not a script's output, a zone variance or an unassigned
-    /// value), else `0.0`. What a reader uses when `spatial_step_m` is
-    /// absent.
+    /// The spatial step the header's other fields give, m: `v / (2 ·
+    /// sample_rate)` — v the speed of light in the fibre (`light_speed_m_s`;
+    /// `1e8 / sample_rate` at the legacy 2·10⁸ m/s) — for a content type
+    /// whose positions are the producer's samples (not a script's output, a
+    /// zone variance or an unassigned value), else `0.0`. What a reader uses
+    /// when `spatial_step_m` is absent.
     #[getter]
     fn derived_spatial_step_m(&self) -> f64 {
         self.derived_steps().0
+    }
+
+    /// The speed of light in the fibre every metre of this header is
+    /// converted with, whole m/s: `light_speed_in_fiber_m_s` when it is the
+    /// speed of a group index from 1 to 100, else the legacy 200 000 000
+    /// m/s — what every file recorded before the field (`0`) was acquired
+    /// at.
+    #[getter]
+    fn light_speed_m_s(&self) -> u32 {
+        self.speed()
+    }
+
+    /// The fibre's group index of this header: `fiber_group_index` when the
+    /// file stores one that gives `light_speed_m_s`, else the index of that
+    /// speed — the legacy 1.49896229 for 2·10⁸ m/s (and for a file without a
+    /// speed), 1.4682 for 204 190 477 m/s, `c / v` otherwise (Audace-Lib
+    /// `header::fiber_group_index`).
+    #[getter]
+    fn group_index(&self) -> f64 {
+        fibre::effective_group_index(self.fiber_group_index, self.light_speed_in_fiber_m_s)
+    }
+
+    /// A copy of this header labelled at the fibre group index `n`: the
+    /// speed of light `round(c / n)` and the exact `n` stamped in place of
+    /// the file's, and every metre the header states converted from the
+    /// file's speed `v` to the new one `v'` — the samples do not depend on
+    /// the speed, only their labels do (`File(path, fiber_group_index=n)`):
+    ///
+    /// * `spatial_step_m`: the new pitch `v' / (2 · sample_rate)` when the
+    ///   stored step is the pitch of the acquisition's own positions at `v`;
+    ///   any other step (an archive export's zone spacing) `× v' / v`;
+    /// * `gauge_length_m`: `k · v' / (2 · sample_rate)` when it is a whole
+    ///   number `k` of positions at `v` (what a producer stamps), else
+    ///   `× v' / v`;
+    /// * `trigger_delay` (whole metres): `× v' / v`, to the nearest metre,
+    ///   halves up.
+    ///
+    /// At the file's own speed nothing but the index changes. Raises
+    /// `ValueError` for an index that is not a number from 1 to 100.
+    fn with_fiber_group_index(&self, n: f64) -> PyResult<Self> {
+        let v_new = light_speed_of_group_index(n)?;
+        let v_old = self.speed();
+        let mut out = self.clone();
+        out.light_speed_in_fiber_m_s = v_new;
+        out.fiber_group_index = n;
+        if v_new == v_old {
+            return Ok(out);
+        }
+        let scale = |m: f64| m * f64::from(v_new) / f64::from(v_old);
+        let rate = self.sample_rate as f64;
+        if self.spatial_step_m > 0.0 {
+            let own = self.derived_steps().0;
+            out.spatial_step_m = if own > 0.0 && self.spatial_step_m == own {
+                out.derived_steps().0
+            } else {
+                scale(self.spatial_step_m)
+            };
+        }
+        if self.gauge_length_m > 0.0 {
+            let whole = (self.sample_rate > 0)
+                .then(|| (2.0 * self.gauge_length_m * rate / f64::from(v_old)).round())
+                .filter(|k| (1.0..=1e15).contains(k) && fibre::metres_of_positions(*k, v_old, rate) == self.gauge_length_m);
+            out.gauge_length_m = match whole {
+                Some(k) => fibre::metres_of_positions(k, v_new, rate),
+                None => scale(self.gauge_length_m),
+            };
+        }
+        // ⌊(2 · d · v' + v) / (2 · v)⌋: d · v' / v rounded half up, exact.
+        let d = u128::from(self.trigger_delay) * 2 * u128::from(v_new) + u128::from(v_old);
+        out.trigger_delay = (d / (2 * u128::from(v_old))).min(u128::from(u32::MAX)) as u32;
+        Ok(out)
     }
 
     /// The line period the cadence gives, s: `trig_period_ticks /
@@ -943,6 +1060,12 @@ impl Header {
         }
         if self.gauge_length_m != 0.0 {
             timing.push_str(&format!(", gauge_length_m={}", self.gauge_length_m));
+        }
+        if self.light_speed_in_fiber_m_s != 0 {
+            timing.push_str(&format!(", light_speed_in_fiber_m_s={}", self.light_speed_in_fiber_m_s));
+        }
+        if self.fiber_group_index != 0.0 {
+            timing.push_str(&format!(", fiber_group_index={}", self.fiber_group_index));
         }
         format!(
             "Header(line_size={}, sample_size={}, sample_rate={}, trig_frequency={}{}, \
@@ -1027,13 +1150,18 @@ fn parse_header(bytes: &[u8]) -> PyResult<Header> {
         spatial_step_m: 0.0,
         temporal_step_s: 0.0,
         gauge_length_m: 0.0,
+        light_speed_in_fiber_m_s: read_u32_le(bytes, offsets::LIGHT_SPEED_IN_FIBER_M_S),
+        // A DAT carries the speed only: the index is the speed's
+        // (`group_index`).
+        fiber_group_index: 0.0,
     };
     // The steps and the gauge are f32 here: read back exactly as the other
-    // formats store them (f64), see `exact_step` and `exact_gauge`.
+    // formats store them (f64), see `exact_step` and `exact_gauge` — at the
+    // header's speed of light, read above.
     let (spatial, temporal) = h.derived_steps();
     h.spatial_step_m = exact_step(read_f32(offsets::SPATIAL_STEP_M), spatial);
     h.temporal_step_s = exact_step(read_f32(offsets::TEMPORAL_STEP_S), temporal);
-    h.gauge_length_m = exact_gauge(read_f32(offsets::GAUGE_LENGTH_M), h.sample_rate);
+    h.gauge_length_m = exact_gauge(read_f32(offsets::GAUGE_LENGTH_M), h.sample_rate, h.speed());
     Ok(h)
 }
 
@@ -1634,6 +1762,11 @@ fn build_header_bytes<'py>(py: Python<'py>, header: &Header) -> PyResult<Bound<'
     // the header carries it (the export decides whether a file keeps it).
     buf[offsets::GAUGE_LENGTH_M..offsets::GAUGE_LENGTH_M + 4]
         .copy_from_slice(&step(header.gauge_length_m).to_le_bytes());
+    // The speed of light in the fibre (bytes 124..128), u32, as the header
+    // carries it: zero (absent, the legacy 2·10⁸ m/s) on every header that
+    // has none. A DAT stores the speed only, never the index.
+    buf[offsets::LIGHT_SPEED_IN_FIBER_M_S..offsets::LIGHT_SPEED_IN_FIBER_M_S + 4]
+        .copy_from_slice(&header.light_speed_in_fiber_m_s.to_le_bytes());
 
     Ok(PyBytes::new(py, &buf))
 }
@@ -1976,6 +2109,36 @@ fn simd_levels() -> Vec<&'static str> {
         .collect()
 }
 
+// ── The fibre's group index ─────────────────────────────────────────────────
+
+/// The speed of light in a fibre of group index `n`, whole m/s:
+/// `round(c / n)`, half away from zero — the speed the acquisition stamps in
+/// every header for a configured index (Audace-Lib `fibre::speed_m_s`).
+/// `light_speed_of_group_index(1.4682) == 204190477`,
+/// `light_speed_of_group_index(1.49896229) == 200000000`. Raises
+/// `ValueError` for an index that is not a number from 1 to 100 (the only
+/// values refused).
+#[pyfunction]
+fn light_speed_of_group_index(n: f64) -> PyResult<u32> {
+    fibre::speed_m_s(n).ok_or_else(|| {
+        PyValueError::new_err(format!(
+            "fibre group index {n} refused: it must be a number from {} to {}",
+            fibre::MIN_GROUP_INDEX,
+            fibre::MAX_GROUP_INDEX
+        ))
+    })
+}
+
+/// The group index a speed of light in the fibre stands for (a reader that
+/// has only the speed, a DAT): the legacy 1.49896229 for 200 000 000 m/s
+/// (and for `0`, absent), 1.4682 for 204 190 477 m/s — the two indexes the
+/// acquisition writes, given back exactly — `c / v` otherwise (Audace-Lib
+/// `fibre::group_index_of_speed`).
+#[pyfunction]
+fn group_index_of_light_speed(v: u32) -> f64 {
+    fibre::group_index_of_speed(v)
+}
+
 // ── Module init ─────────────────────────────────────────────────────────────
 
 /// Module entry point — Python imports this as `invisensing._core`.
@@ -2001,6 +2164,15 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // nm/m of strain per rad/m of phase over the gauge (110.37), see
     // `strain::NANOSTRAIN_PER_RAD_METRE`.
     m.add("NANOSTRAIN_PER_RAD_METRE", strain::NANOSTRAIN_PER_RAD_METRE)?;
+    // The fibre's group index (`fibre`, Audace-Lib `audace::fibre`).
+    m.add_function(wrap_pyfunction!(light_speed_of_group_index, m)?)?;
+    m.add_function(wrap_pyfunction!(group_index_of_light_speed, m)?)?;
+    m.add("SPEED_OF_LIGHT_M_S", fibre::SPEED_OF_LIGHT_M_S)?;
+    m.add("DEFAULT_FIBER_GROUP_INDEX", fibre::DEFAULT_GROUP_INDEX)?;
+    m.add("LEGACY_FIBER_GROUP_INDEX", fibre::LEGACY_GROUP_INDEX)?;
+    m.add("LEGACY_LIGHT_SPEED_IN_FIBER_M_S", fibre::LEGACY_SPEED_M_S)?;
+    m.add("FIBER_GROUP_INDEX_MIN", fibre::MIN_GROUP_INDEX)?;
+    m.add("FIBER_GROUP_INDEX_MAX", fibre::MAX_GROUP_INDEX)?;
 
     // Expose the header-flag bits as module-level constants (i.e.
     // `invisensing._core.FLAG_INTERLEAVED`) so the Python wrapper and any

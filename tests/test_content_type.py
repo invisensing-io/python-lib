@@ -13,8 +13,10 @@ replaced by their FNV-1a digests and flag bit 0x020 named ``RESERVED``, so
 this package never spells a card model — and pinned by its own SHA-256 and
 by the upstream SHA-256 it was derived from (the producer's and the
 console's tests pin that one: changing the upstream file fails here until
-the copy is derived again). With Audace-Lib checked out beside python-lib,
-the derivation is replayed and compared byte for byte.
+the copy is derived again). With Audace-Lib checked out beside python-lib
+(or where the ``AUDACE_LIB`` environment variable says: a worktree of
+python-lib has no sibling checkout), the derivation is replayed and
+compared byte for byte.
 """
 
 from __future__ import annotations
@@ -23,6 +25,7 @@ import hashlib
 import importlib.util
 import json
 import math
+import os
 import re
 import warnings
 from pathlib import Path
@@ -69,22 +72,25 @@ def _header(**kw) -> Header:
 
 # ── The registry, against the producer's ───────────────────────────────────
 
-#: The producer's registry, revision 4 (content types 0..32). To follow a
-#: new revision: `python tests/assets/derive_content_types_v1.py
+#: The producer's registry, revision 5 (content types 0..32; the header
+#: rows up to byte 128, the fibre group index constants). To follow a new
+#: revision: `python tests/assets/derive_content_types_v1.py
 #: ../Audace-Lib/tests/fixtures/content_types_v1.json`, put the two SHA-256
 #: it prints below, and add the new rows to `src/content.rs`.
 ASSETS = Path(__file__).resolve().parent / "assets"
 REGISTRY_FIXTURE = ASSETS / "content_types_v1.json"
-#: SHA-256 of the derived copy beside these tests.
-REGISTRY_SHA256 = "2c16f669fdfabf93a987580c393903c44abad167d58a8a936be3830071ac40cc"
-#: SHA-256 of the producer's file it was derived from (Audace-Lib 6188a56,
-#: `tests/fixtures/content_types_v1.json`, revision 4).
-UPSTREAM_REGISTRY_SHA256 = "75d3a747487d4866f52399a34d876a89e9f3d322f91830d3fecacb5da1b86a8f"
-#: The producer's file, when Audace-Lib is checked out beside python-lib.
-UPSTREAM_REGISTRY = (
-    Path(__file__).resolve().parent.parent.parent
-    / "Audace-Lib" / "tests" / "fixtures" / "content_types_v1.json"
+#: SHA-256 of the derived copy beside these tests (it differs from the
+#: producer's: the derivation rewrites the card tags and one flag name).
+REGISTRY_SHA256 = "41505c074173a1bf404e6113b65b284c378173818aa006492af4456d0e7ce5ea"
+#: SHA-256 of the producer's file it was derived from (Audace-Lib a288414,
+#: `tests/fixtures/content_types_v1.json`, revision 5).
+UPSTREAM_REGISTRY_SHA256 = "76831d7214fe5ca3fda4ad8f8ee13fe77570ba32593c1efa96ec4a1aa96d7f77"
+#: Audace-Lib: checked out beside python-lib, or where `AUDACE_LIB` says.
+AUDACE_LIB = Path(
+    os.environ.get("AUDACE_LIB") or Path(__file__).resolve().parent.parent.parent / "Audace-Lib"
 )
+#: The producer's file, when Audace-Lib is there.
+UPSTREAM_REGISTRY = AUDACE_LIB / "tests" / "fixtures" / "content_types_v1.json"
 
 
 def _derivation():
@@ -171,48 +177,40 @@ def test_the_helpers_give_the_producer_s_sets(registry):
         assert content.is_file_value(v) == ("file" in e["file_or_stream"].split("+"))
 
 
-#: Header fields the producer writes that the registry's revision 4 does not
-#: list yet: ``gauge_length_m`` (Audace-Lib a5fccd5, DATA_FORMAT.md §3.4;
-#: §11 says the ``header`` list gains it with the next revision, which
-#: re-pins this copy anyway). Checked against Audace-Lib's source below; when
-#: the registry lists a field, it is compared there like any other and leaves
-#: this table.
-AHEAD_OF_THE_REGISTRY = {"gauge_length_m": (120, 4, "f32")}
-#: Audace-Lib's sources, when it is checked out beside python-lib.
-UPSTREAM_SRC = UPSTREAM_REGISTRY.parents[2] / "src"
+#: Audace-Lib's sources, when it is checked out (see `AUDACE_LIB`).
+UPSTREAM_SRC = AUDACE_LIB / "src"
 
 
 def test_the_header_layout_is_the_producer_s(registry):
+    """Revision 5 lists every field up to byte 128 (the gauge at 120, the
+    speed of light in the fibre at 124): the layout is the registry's, field
+    for field, and fills the header."""
     assert registry["header_size"] == HEADER_SIZE
     assert registry["format_version"] == FORMAT_VERSION
     assert registry["endianness"] == "little"
     theirs = {f["name"]: (f["offset"], f["size"], f["type"]) for f in registry["header"]}
     ours = {name: (offset, size, ty) for name, offset, size, ty in HEADER_LAYOUT}
-    listed = set(AHEAD_OF_THE_REGISTRY) & set(theirs)
-    assert not listed, f"the registry lists {sorted(listed)} now: drop them from AHEAD_OF_THE_REGISTRY"
-    ahead = {name: ours.pop(name) for name in AHEAD_OF_THE_REGISTRY}
-    assert ahead == AHEAD_OF_THE_REGISTRY
     assert ours == theirs
-    # Bytes no other field takes, inside the header.
-    taken = [(o, o + n) for o, n, _ in theirs.values()]
-    for name, (o, n, _) in ahead.items():
-        assert o + n <= HEADER_SIZE
-        assert all(o + n <= a or b <= o for a, b in taken), name
+    assert max(o + n for o, n, _ in theirs.values()) == HEADER_SIZE
 
 
 @pytest.mark.skipif(
     not (UPSTREAM_SRC / "header.rs").exists(),
     reason="Audace-Lib is not checked out next to python-lib",
 )
-def test_the_fields_ahead_of_the_registry_are_the_producer_s():
-    """The registry does not list ``gauge_length_m`` yet: its offset and type
-    are read from the producer's own source instead (``GAUGE_LENGTH_OFF``,
-    ``DataHeader.gauge_length_m: f32``)."""
+def test_the_last_fields_are_the_producer_s_source():
+    """The gauge and the speed of light, against the producer's own source
+    as well as its registry (``GAUGE_LENGTH_OFF``, ``LIGHT_SPEED_OFF``, the
+    ``DataHeader`` field types)."""
     header_rs = (UPSTREAM_SRC / "header.rs").read_text()
     types_rs = (UPSTREAM_SRC / "types.rs").read_text()
-    offset = int(re.search(r"pub const GAUGE_LENGTH_OFF: usize = (\d+);", header_rs).group(1))
-    ty = re.search(r"pub gauge_length_m: (\w+),", types_rs).group(1)
-    assert AHEAD_OF_THE_REGISTRY["gauge_length_m"] == (offset, 4, ty)
+    ours = {name: (offset, size, ty) for name, offset, size, ty in HEADER_LAYOUT}
+    gauge = int(re.search(r"pub const GAUGE_LENGTH_OFF: usize = (\d+);", header_rs).group(1))
+    speed = int(re.search(r"pub const LIGHT_SPEED_OFF: usize = (\d+);", header_rs).group(1))
+    assert ours["gauge_length_m"] == (gauge, 4, re.search(r"pub gauge_length_m: (\w+),", types_rs).group(1))
+    assert ours["light_speed_in_fiber_m_s"] == (
+        speed, 4, re.search(r"pub light_speed_m_s: (\w+),", types_rs).group(1)
+    )
 
 
 def test_the_flag_bits_are_the_producer_s(registry):
@@ -253,10 +251,23 @@ def test_export_writes_the_producer_s_file_flags(registry, tmp_path, ct):
 
 
 def test_the_light_speed_is_the_producer_s(registry):
-    c = registry["light_speed_in_fiber_m_s"]
+    """The fibre constants of the registry (revision 5) are this SDK's, and
+    a header without a speed is read at the legacy one: the f64 pitch of
+    before, exactly."""
+    import invisensing
+
+    assert registry["speed_of_light_m_s"] == invisensing.SPEED_OF_LIGHT_M_S == 299_792_458
+    legacy = registry["legacy_light_speed_in_fiber_m_s"]
+    assert legacy == invisensing.LEGACY_LIGHT_SPEED_IN_FIBER_M_S == 200_000_000
+    assert registry["legacy_fiber_group_index"] == invisensing.LEGACY_FIBER_GROUP_INDEX
+    assert registry["default_fiber_group_index"] == invisensing.DEFAULT_FIBER_GROUP_INDEX
+    assert registry["fiber_group_index_min"] == invisensing.FIBER_GROUP_INDEX_MIN
+    assert registry["fiber_group_index_max"] == invisensing.FIBER_GROUP_INDEX_MAX
+    assert invisensing.light_speed_of_group_index(registry["legacy_fiber_group_index"]) == legacy
     for rate in (250_000_000, 500_000_000, 62_500_000):
         h = _header(sample_rate=rate, content_type=1)
-        assert h.derived_spatial_step_m == c / 2 / rate
+        assert h.light_speed_in_fiber_m_s == 0 and h.light_speed_m_s == legacy
+        assert h.derived_spatial_step_m == legacy / 2 / rate == 1e8 / rate
 
 
 def test_the_card_codes_are_the_producer_s(registry):

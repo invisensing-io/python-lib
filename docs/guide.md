@@ -121,6 +121,8 @@ with File("acquisition.dat") as f:
     f.lines_left             # pulses behind the read cursor
     f.duration               # seconds (= num_lines / trig_frequency_real_hz)
     f.distance               # metres of fibre covered per pulse
+    f.light_speed_in_fiber_m_s  # m/s the metres are labelled with (2e8 on old files)
+    f.fiber_group_index      # its fibre group index (1.4682; 1.49896229 on old files)
     f.range                  # ADC voltage range (V)
     f.timestamp              # start time as the format spells it
     f.content_type_name      # what the samples are ("dui_coherent_phase", "hw_amplitude"…)
@@ -144,6 +146,59 @@ with File("acquisition.dat") as f:
     f.is_demodulated, f.is_interleaved, f.is_float, f.is_phase
     f.is_unsigned, f.is_ac, f.is_hiz
 ```
+
+### The fibre group index (since 1.7.0)
+
+A DAS times the round trip of a pulse; the speed of light in the fibre
+`v` turns that time into metres, one position spanning `v / (2 ·
+sample_rate)`. `v = c / n`, with `n` the fibre's **group index** (the
+"IOR" an OTDR is programmed with). The Audace acquisition takes `n` as a
+parameter — default **1.4682**, Corning SMF-28e+ at 1550 nm — derives one
+whole speed `v = round(c / n)` m/s, half away from zero, and writes it into
+every file:
+
+| Format | Speed | Index |
+|---|---|---|
+| DAT | header bytes 124..128, u32 | — (the index of the speed) |
+| HDF5 | root attribute `light_speed_in_fiber_m_s`, u32 | attribute `fiber_group_index`, f64, exactly as configured |
+| TDMS | property `light_speed_in_fiber_m_s` | property `fiber_group_index` |
+| SEG-Y | textual line `FIBER GROUP INDEX: n (LIGHT SPEED v M/S)` | the same line |
+
+Every metre the SDK reports — `distance`, `spatial_step_m`,
+`gauge_length_m`, `trigger_delay` — is at the file's speed, exposed as
+`f.light_speed_in_fiber_m_s` (int) and `f.fiber_group_index` (float):
+
+| n | v (m/s) | step at 62.5 / 125 / 250 / 500 / 1000 MS/s |
+|---|---|---|
+| 1.4682 (default) | 204 190 477 | 1.633524 / 0.816762 / 0.408381 / 0.204190 / 0.102095 m |
+| 1.49896229 (legacy) | 200 000 000 | 1.6 / 0.8 / 0.4 / 0.2 / 0.1 m |
+
+**Old recordings.** A file written before the field carries no speed: it
+was acquired at the legacy 2·10⁸ m/s (index 1.49896229) and reads exactly
+as with 1.6.0, bit for bit. When its fibre is known, label it at its
+index:
+
+```python
+with File("phase/2026-06-01_10-00-00.dat", fiber_group_index=1.4682) as f:
+    f.fiber_group_index            # 1.4682
+    f.recorded_fiber_group_index   # 1.49896229 — what the file says
+    f.spatial_step_m               # 1.633524 at 62.5 MS/s (1.6 as recorded)
+```
+
+The samples never change — the card samples time — only their labels: the
+speed becomes `round(c / n)`; the spatial step is the pitch at the new
+speed (an archive export's zone spacing is scaled by `v' / v`); a gauge of
+`k` whole positions becomes `k · v' / (2 · sample_rate)`; the trigger
+pre-roll is scaled to the nearest metre. The strain factors follow the
+gauge. `f.header` is the relabelled header (`Header.with_fiber_group_index`),
+so `f.export_dat()` writes the new speed. Any index from 1 to 100 is
+accepted; below 1, above 100, NaN or infinite raise `ValueError`.
+
+`light_speed_of_group_index(n)` and `group_index_of_light_speed(v)` are the
+acquisition's own conversions (the latter gives back 1.4682 and 1.49896229
+exactly, `c / v` for any other speed); `LEGACY_LIGHT_SPEED_IN_FIBER_M_S`,
+`LEGACY_FIBER_GROUP_INDEX` and `DEFAULT_FIBER_GROUP_INDEX` name the two
+indexes.
 
 ### Requested vs. real trigger frequency
 
@@ -363,7 +418,9 @@ with File("phase/2026-11-12_10-00-00.h5", phase_unit="nanostrain") as f:
     fibre core and Cε the photo-elastic coefficient. At λ = 1550.12 nm and
     n = 1.46 this gives 110.37 nm/m per rad/m
     (`invisensing.NANOSTRAIN_PER_RAD_METRE`). It is a constant of the SDK,
-    not a parameter.
+    not a parameter. Its n is the core's *phase* index: it does not follow
+    the fibre *group* index the file's metres are labelled at
+    (`f.fiber_group_index`). The gauge length, a distance, does.
 
 **The gauge length** is the one the producer *applied* — the distance
 between the two ends of the differential gauge, a whole number of the
@@ -549,9 +606,11 @@ dataset named `acoustic_data`, typed by the content type (`int16`,
 `uint16`, `float32`; on older files by `bytes_per_sample` and the `FLOAT`
 attribute). Every header field is mirrored as a scalar attribute — with
 data format v1 also `format_version`, `card`, `duration_s` and the steps
-in f64, and `gauge_length_m` on a phase with a known gauge (from the
-Audace release that writes it). Lines are read slice by slice: a multi-GB capture never has to fit
-in RAM.
+in f64, `gauge_length_m` on a phase with a known gauge (from the
+Audace release that writes it), and `light_speed_in_fiber_m_s` (u32) with
+`fiber_group_index` (f64) since the fibre group index (absent: the legacy
+2·10⁸ m/s). Lines are read slice by slice: a multi-GB capture never has
+to fit in RAM.
 
 Recordings written with the FileWriter's `compression = ZSTD` store the
 dataset in chunks through the standard pipeline byte shuffle + zstd
@@ -571,7 +630,8 @@ One trace per line (trigger), whose samples run along the fibre:
 `samples_per_trace = line_size`. Header fields not expressible in the
 SEG-Y binary header are written as `KEY: value` lines of the textual
 header (e.g. `C16 - CONTENT-TYPE: dui_coherent_phase (19)`, `C21 HEADER
-FLAGS (raw bits): 0xNNNNNNNN`, `C24 CARD: p21`). The SDK reads the 3200
+FLAGS (raw bits): 0xNNNNNNNN`, `C24 CARD: p21`, `C26 FIBER GROUP INDEX:
+1.4682 (LIGHT SPEED 204190477 M/S)`). The SDK reads the 3200
 bytes itself — in ASCII, what the acquisition writes, or EBCDIC — and
 parses them back into a `Header`. Unsigned 16-bit samples are stored as
 4-byte integers (`BYTES PER SAMPLE: 2`) and read back as `uint16`.
@@ -613,8 +673,11 @@ with File("phase/2026-11-03_10-00-00.h5") as f:
 ```
 
 A v1 file keeps only the `AC` and `HIZ` flags, carries the steps (kept or
-derived), the card code and the duration of the lines written; the data
-must be of the content type's sample type. A header of content type 0 (or
+derived), the card code, the speed of light in the fibre and the duration
+of the lines written; the data must be of the content type's sample type.
+`fiber_group_index=n` stamps the speed of `n` (header bytes 124..128); with
+`header=`, the header is relabelled at `n` first, as
+`File(path, fiber_group_index=n)` does. A header of content type 0 (or
 of pairs, or an unknown value) is copied as it is. A recording whose card
 fired at an inexact rate is refused: a DAT never carries one.
 

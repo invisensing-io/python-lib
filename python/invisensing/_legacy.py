@@ -51,8 +51,11 @@ HEADER_FORMAT = "32siiiiii72x"
 class Constants:
     """Constants used in the application — kept for backwards compat."""
 
-    # Speed of light in the fibre (m/s), the value used everywhere in Audace
-    # (the legacy C++ CardControl's LIGHT_SPEED_IN_FIBER).
+    # The LEGACY speed of light in the fibre (m/s): the legacy C++
+    # CardControl's LIGHT_SPEED_IN_FIBER, what every recording made before
+    # the fibre group index was configurable (2026-11-17) was acquired at.
+    # Kept unchanged for legacy callers; a file's own speed is
+    # `invisensing.File(path).light_speed_in_fiber_m_s`.
     LIGHT_SPEED_IN_FIBER = 200_000_000  # m/s
 
 
