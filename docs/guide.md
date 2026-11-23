@@ -260,6 +260,23 @@ Keep `trig_frequency_real_hz` as the sampling rate along time (spectra,
 filters, Nyquist): the correction moves the time *labels*, not the samples.
 Every file written before the time map is timed exactly as 1.3.0 timed it.
 
+### The node's clock at the run's START
+
+Every line's time is anchored on the node's clock when the run started. An
+HDF5 file recorded since 2026-11-22 says whether that clock was trusted:
+
+| Property | Meaning |
+|---|---|
+| `host_clock_synchronized` | `HostClockSync.SYNCHRONIZED`, `NOT_SYNCHRONIZED` or `UNKNOWN` (attribute `host_clock_synchronized`); `.synchronized` gives `True` / `False` / `None` |
+| `start_time_guard` | how the START passed the console's time guard: `StartTimeGuard.OPEN`, `WAIVED` (a node offline with no time source), `LIFTED` or `LIFTED_PERMANENT` (a **forced** START, past a guard an administrator lifted), `UNKNOWN` (attribute `start_time_guard`); `.forced` gives `True` / `False` / `None` |
+
+Both are `None` on a file that does not record them: HDF5 files written
+before 2026-11-22, and every DAT, SEG-Y and TDMS file. Those formats have no
+place for them: the manifest beside the files does (`run-….json` of a
+continuous recording, `save-….json` of a buffered save, with the time of
+each file's first and last line, `t_start_ns` and `t_last_ns`); read it as
+JSON. A value this SDK does not know reads `UNKNOWN`, never synchronised.
+
 ---
 
 ## What a file holds (`Mode` enum)

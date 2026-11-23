@@ -619,6 +619,11 @@ class _Hdf5Backend:
         self.first_line = _opt_int_attr(attrs, "first_line")
         self.duration_exact_s = _positive_float_attr(attrs, "duration_exact_s")
         self.analog_trigger = _analog_trigger(attrs)
+        # The host clock and the time guard at the run's START (Audace-Lib
+        # DATA_FORMAT.md §8.7, since 2026-11-22): the tags as stored, read
+        # as enums by the File. Absent on older files.
+        self.host_clock_synchronized_attr = _str_attr(attrs, "host_clock_synchronized")
+        self.start_time_guard_attr = _str_attr(attrs, "start_time_guard")
 
     def _require_open(self):
         dataset = getattr(self, "_dataset", None)

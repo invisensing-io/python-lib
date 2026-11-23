@@ -61,6 +61,27 @@ synthesising files in tests).
 
 ---
 
+## HostClockSync and StartTimeGuard
+
+The node's clock and the console's time guard when the run's START was sent
+(Audace-Lib `docs/DATA_FORMAT.md` §8.7), as `File.host_clock_synchronized`
+and `File.start_time_guard` return them. Both are `str` enums: a member
+compares equal to the tag the file stores.
+
+```python
+from invisensing import File, StartTimeGuard
+
+with File("recording.h5") as f:
+    if f.start_time_guard is not None and f.start_time_guard.forced:
+        print("started past a lifted time guard: the times come from an unproven clock")
+```
+
+::: invisensing.HostClockSync
+
+::: invisensing.StartTimeGuard
+
+---
+
 ## DatReader
 
 Low-level streaming reader for `.dat` files. The `File` class wraps

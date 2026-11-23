@@ -4,6 +4,30 @@ Changes to the `invisensing` package, one section per version published on
 PyPI. Each section lists what a script written for the previous version may
 see differently, then what is new.
 
+## Unreleased
+
+Reads the node's clock at the run's START, which every HDF5 file of the
+Audace FileWriter records since 2026-11-22 (Audace-Lib
+`docs/DATA_FORMAT.md` §8.7).
+
+Nothing a 1.7.0 script reads changes: the additions are new names.
+
+### Added
+
+- **`File.host_clock_synchronized`** (`HostClockSync`: `SYNCHRONIZED`,
+  `NOT_SYNCHRONIZED`, `UNKNOWN`) and **`File.start_time_guard`**
+  (`StartTimeGuard`: `OPEN`, `WAIVED`, `LIFTED`, `LIFTED_PERMANENT`,
+  `UNKNOWN`; `.forced` is `True` for a START forced past a lifted time
+  guard). `str` enums, equal to the stored tags; `None` on a file that does
+  not record them (older HDF5, DAT, SEG-Y, TDMS). An unknown tag reads
+  `UNKNOWN`.
+
+### Fixed
+
+- The test of the arctan's range compared float32 samples with the float64
+  π: the raw −32768 is float32(π), one ulp above it. It now compares with π
+  as float32 holds it (test only, no library change).
+
 ## 1.7.0
 
 Reads the speed of light in the fibre a recording was acquired at. The

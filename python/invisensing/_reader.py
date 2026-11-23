@@ -47,6 +47,7 @@ import numpy as np
 from . import _core
 from . import _formats
 from . import content as _content
+from ._start_clock import HostClockSync, StartTimeGuard
 from ._core import (
     DatReader,
     Header,
@@ -573,6 +574,13 @@ class File:
         self._first_line = getattr(self._backend, "first_line", None)
         self._duration_exact_s = getattr(self._backend, "duration_exact_s", None)
         self._analog_trigger = getattr(self._backend, "analog_trigger", None)
+        # The host clock and the time guard at the run's START (HDF5 only).
+        self._host_clock_synchronized = HostClockSync.from_tag(
+            getattr(self._backend, "host_clock_synchronized_attr", None)
+        )
+        self._start_time_guard = StartTimeGuard.from_tag(
+            getattr(self._backend, "start_time_guard_attr", None)
+        )
         self._trailing_bytes = int(getattr(self._backend, "trailing_bytes", 0) or 0)
         if phase_unit != "rad":
             try:
@@ -1085,6 +1093,29 @@ class File:
         HDF5 only: the mode writes nothing else. CH2, the trigger input, is
         never in the file."""
         return self._analog_trigger
+
+    @property
+    def host_clock_synchronized(self) -> Optional[HostClockSync]:
+        """Whether the node's clock was synchronised when the console sent
+        the START of the run this file belongs to
+        (:class:`~invisensing.HostClockSync`: ``SYNCHRONIZED``,
+        ``NOT_SYNCHRONIZED`` or ``UNKNOWN``; ``.synchronized`` gives it as a
+        bool). ``None`` when the file does not record it: a DAT, SEG-Y or
+        TDMS file (the manifest beside it does) and every HDF5 file written
+        before 2026-11-22. A value this SDK does not know reads ``UNKNOWN``,
+        never synchronised."""
+        return self._host_clock_synchronized
+
+    @property
+    def start_time_guard(self) -> Optional[StartTimeGuard]:
+        """How the START of the run this file belongs to passed the
+        console's time guard (:class:`~invisensing.StartTimeGuard`:
+        ``OPEN``, ``WAIVED``, ``LIFTED``, ``LIFTED_PERMANENT`` or
+        ``UNKNOWN``); ``.forced`` is ``True`` for a START forced past a
+        lifted guard — its times come from a clock nobody proved. ``None``
+        when the file does not record it (see
+        :attr:`host_clock_synchronized`)."""
+        return self._start_time_guard
 
     @property
     def analog_trigger_index(self) -> Optional[int]:

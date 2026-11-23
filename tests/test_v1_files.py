@@ -159,7 +159,9 @@ def test_the_card_magnitude_in_volts_and_the_arctan_in_radians():
         np.testing.assert_allclose(m.get_magnitude_volts(n=m.num_lines), mag * (1.0 / 32768), rtol=1e-6)
     with File(ASSETS / "arctan_magnitude_dat/arctan/2026-11-03_10-00-00.dat") as a:
         rad = a.get_arctan_radians(n=a.num_lines)
-        assert rad.dtype == np.float32 and np.abs(rad).max() <= np.pi
+        # Raw −32768 × float32(π / 32768) is float32(π), one ulp above the
+        # float64 π: the bound is π as the float32 samples carry it.
+        assert rad.dtype == np.float32 and np.abs(rad).max() <= np.float32(np.pi)
 
 
 def test_the_archive_exports_give_the_variance():

@@ -120,6 +120,7 @@ from ._reader import (
 )
 from . import content
 from ._analog import AnalogTrigger
+from ._start_clock import HostClockSync, StartTimeGuard
 from . import _legacy as _legacy_impl
 
 # Kept in step with pyproject.toml and Cargo.toml by
@@ -131,6 +132,8 @@ __all__ = [
     "File",
     "Mode",
     "AnalogTrigger",
+    "HostClockSync",
+    "StartTimeGuard",
     "Header",
     "DatReader",
     "parse_header",
