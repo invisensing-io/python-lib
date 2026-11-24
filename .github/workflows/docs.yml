@@ -62,13 +62,15 @@ jobs:
           sccache: true
 
       # Install the freshly-built wheel + the docs dependencies. We
-      # use `pip install --find-links` rather than `maturin develop`
-      # because the latter requires a venv that doesn't exist on the
-      # bare runner.
+      # install the wheel rather than use `maturin develop` because the
+      # latter requires a venv that doesn't exist on the bare runner.
+      # The wheel is installed by its path: with `--find-links ...
+      # invisensing`, pip took the PyPI wheel whenever PyPI already had
+      # the same version, and documented the published code instead.
       - name: Install wheel + docs deps
         run: |
           python -m pip install --upgrade pip
-          python -m pip install --find-links target/wheels invisensing
+          python -m pip install target/wheels/invisensing-*.whl
           python -m pip install mkdocs mkdocs-material "mkdocstrings[python]" pymdown-extensions black
 
       - name: Build MkDocs site

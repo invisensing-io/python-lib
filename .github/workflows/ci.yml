@@ -49,11 +49,14 @@ jobs:
       # Install the freshly-built wheel + the runtime deps + pytest.
       # We use the wheel rather than `maturin develop` so the test run
       # exercises the exact same artefact that would ship to PyPI.
+      # The wheel is installed by its path: with `--find-links ...
+      # invisensing`, pip took the PyPI wheel whenever PyPI already had
+      # the same version, and tested the published code instead.
       - name: Install wheel + test deps
         run: |
           python -m pip install --upgrade pip
           python -m pip install pytest
-          python -m pip install --find-links target/wheels invisensing
+          python -m pip install target/wheels/invisensing-*.whl
 
       - name: Run the test suite
         run: pytest tests/ -v

@@ -4,7 +4,7 @@ Changes to the `invisensing` package, one section per version published on
 PyPI. Each section lists what a script written for the previous version may
 see differently, then what is new.
 
-## Unreleased
+## 1.8.0
 
 Reads the node's clock at the run's START, which every HDF5 file of the
 Audace FileWriter records since 2026-11-22 (Audace-Lib
